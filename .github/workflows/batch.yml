@@ -1,0 +1,82 @@
+name: Dependabot batch merge (reusable)
+
+on:
+  workflow_call:
+    inputs:
+      validation-command:
+        description: 'Shell command run after each merge (required when mode=batch).'
+        required: false
+        type: string
+      mode:
+        description: '"batch" or "close-sources".'
+        required: false
+        type: string
+        default: batch
+      base-branch:
+        required: false
+        type: string
+        default: main
+      integration-branch-prefix:
+        required: false
+        type: string
+        default: chore/dependabot-batch
+      dependabot-author:
+        required: false
+        type: string
+        default: dependabot[bot]
+      on-failure:
+        required: false
+        type: string
+        default: skip
+      re-run-final-suite:
+        required: false
+        type: string
+        default: 'true'
+      draft-pr:
+        required: false
+        type: string
+        default: 'true'
+      max-prs:
+        required: false
+        type: string
+        default: '20'
+      close-source-prs:
+        required: false
+        type: string
+        default: 'false'
+      action-ref:
+        description: 'Ref of obaDev95/dependabot-batch-merge to use (e.g. v1, main, sha).'
+        required: false
+        type: string
+        default: main
+    secrets:
+      CURSOR_API_KEY:
+        required: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout target repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Run dependabot-batch-merge
+        uses: obaDev95/dependabot-batch-merge@${{ inputs.action-ref }}
+        with:
+          mode: ${{ inputs.mode }}
+          validation-command: ${{ inputs.validation-command }}
+          base-branch: ${{ inputs.base-branch }}
+          integration-branch-prefix: ${{ inputs.integration-branch-prefix }}
+          dependabot-author: ${{ inputs.dependabot-author }}
+          on-failure: ${{ inputs.on-failure }}
+          re-run-final-suite: ${{ inputs.re-run-final-suite }}
+          draft-pr: ${{ inputs.draft-pr }}
+          max-prs: ${{ inputs.max-prs }}
+          close-source-prs: ${{ inputs.close-source-prs }}
+          cursor-api-key: ${{ secrets.CURSOR_API_KEY }}
