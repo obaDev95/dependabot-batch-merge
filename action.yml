@@ -1,0 +1,68 @@
+name: 'Dependabot Batch Merge'
+description: 'Batch open Dependabot PRs into one integration branch, validate each merge, open a single PR to the base branch.'
+author: 'Omar Baldi'
+branding:
+  icon: 'git-merge'
+  color: 'blue'
+
+inputs:
+  mode:
+    description: 'Operation mode: "batch" (merge PRs and open batch PR) or "close-sources" (close PASSed source PRs after batch PR merged).'
+    required: false
+    default: 'batch'
+  validation-command:
+    description: 'Shell command run after each merge to validate the integration branch (e.g. "npm ci && npm test"). Required when mode=batch.'
+    required: false
+  base-branch:
+    description: 'Branch the integration branch is cut from and the batch PR targets.'
+    required: false
+    default: 'main'
+  integration-branch-prefix:
+    description: 'Prefix for the integration branch name. Date suffix is appended.'
+    required: false
+    default: 'chore/dependabot-batch'
+  dependabot-author:
+    description: 'GitHub login used to identify Dependabot PRs.'
+    required: false
+    default: 'dependabot[bot]'
+  on-failure:
+    description: 'How to handle a PR that fails validation: "skip" (drop the merge) or "revert-commit" (keep merge, add revert).'
+    required: false
+    default: 'skip'
+  re-run-final-suite:
+    description: 'Re-run the validation command on the integration branch tip before opening the batch PR.'
+    required: false
+    default: 'true'
+  draft-pr:
+    description: 'Open the batch PR as a draft.'
+    required: false
+    default: 'true'
+  max-prs:
+    description: 'Maximum number of Dependabot PRs to process in one run (safety cap).'
+    required: false
+    default: '20'
+  close-source-prs:
+    description: 'Used in mode=close-sources. If true, close PASSed source Dependabot PRs with a "Superseded by" comment.'
+    required: false
+    default: 'false'
+  cursor-api-key:
+    description: 'Cursor Cloud API key, used to generate failure explanations.'
+    required: false
+  github-token:
+    description: 'Token used for GitHub API calls. Defaults to the workflow GITHUB_TOKEN.'
+    required: false
+    default: ${{ github.token }}
+
+outputs:
+  batch-pr-number:
+    description: 'Number of the batch PR opened or updated.'
+  batch-pr-url:
+    description: 'URL of the batch PR.'
+  pass-count:
+    description: 'Number of source PRs that PASSed validation.'
+  fail-count:
+    description: 'Number of source PRs that FAILed validation.'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
