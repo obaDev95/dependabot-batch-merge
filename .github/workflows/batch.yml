@@ -1,4 +1,4 @@
-name: Dependabot batch merge (reusable)
+name: Dependabot batch merge
 
 on:
   workflow_call:
@@ -52,6 +52,61 @@ on:
     secrets:
       CURSOR_API_KEY:
         required: false
+  workflow_dispatch:
+    inputs:
+      validation-command:
+        description: 'Shell command run after each merge (required when mode=batch).'
+        required: false
+        type: string
+        default: ''
+      mode:
+        description: 'Operation mode.'
+        required: false
+        type: choice
+        options:
+          - batch
+          - close-sources
+        default: batch
+      base-branch:
+        required: false
+        type: string
+        default: main
+      integration-branch-prefix:
+        required: false
+        type: string
+        default: chore/dependabot-batch
+      dependabot-author:
+        required: false
+        type: string
+        default: dependabot[bot]
+      on-failure:
+        required: false
+        type: choice
+        options:
+          - skip
+          - revert-commit
+        default: skip
+      re-run-final-suite:
+        required: false
+        type: boolean
+        default: true
+      draft-pr:
+        required: false
+        type: boolean
+        default: true
+      max-prs:
+        required: false
+        type: string
+        default: '20'
+      close-source-prs:
+        required: false
+        type: boolean
+        default: false
+      action-ref:
+        description: 'Ref of obaDev95/dependabot-batch-merge to use (e.g. v1, main, sha).'
+        required: false
+        type: string
+        default: main
 
 jobs:
   run:
