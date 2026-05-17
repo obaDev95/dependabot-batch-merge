@@ -47,6 +47,9 @@ on:
     secrets:
       CURSOR_API_KEY:
         required: false
+      NPMRC_CONTENTS:
+        description: 'Full .npmrc contents (e.g. for private registries). Written to ~/.npmrc before validation runs. No-op if empty.'
+        required: false
   workflow_dispatch:
     # Minimal input surface for smoke testing this repo only.
     # Real consumers (e.g. ui-myfinance) use the workflow_call trigger above,
@@ -78,6 +81,18 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: true
+
+      - name: Set up .npmrc (if NPMRC_CONTENTS provided)
+        env:
+          NPMRC_CONTENTS: ${{ secrets.NPMRC_CONTENTS }}
+        run: |
+          if [ -n "$NPMRC_CONTENTS" ]; then
+            printf '%s' "$NPMRC_CONTENTS" > "$HOME/.npmrc"
+            chmod 600 "$HOME/.npmrc"
+            echo "Wrote ~/.npmrc ($(wc -c < "$HOME/.npmrc") bytes)"
+          else
+            echo "No NPMRC_CONTENTS secret provided — skipping npmrc setup"
+          fi
 
       - name: Run dependabot-batch-merge
         uses: obaDev95/dependabot-batch-merge@main
