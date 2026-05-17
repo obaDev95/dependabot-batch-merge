@@ -44,11 +44,6 @@ on:
         required: false
         type: string
         default: 'false'
-      action-ref:
-        description: 'Ref of obaDev95/dependabot-batch-merge to use (e.g. v1, main, sha).'
-        required: false
-        type: string
-        default: main
     secrets:
       CURSOR_API_KEY:
         required: false
@@ -102,11 +97,6 @@ on:
         required: false
         type: boolean
         default: false
-      action-ref:
-        description: 'Ref of obaDev95/dependabot-batch-merge to use (e.g. v1, main, sha).'
-        required: false
-        type: string
-        default: main
 
 jobs:
   run:
@@ -122,7 +112,7 @@ jobs:
           persist-credentials: true
 
       - name: Run dependabot-batch-merge
-        uses: obaDev95/dependabot-batch-merge@${{ inputs.action-ref }}
+        uses: obaDev95/dependabot-batch-merge@main
         with:
           mode: ${{ inputs.mode }}
           validation-command: ${{ inputs.validation-command }}
