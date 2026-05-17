@@ -48,12 +48,15 @@ on:
       CURSOR_API_KEY:
         required: false
   workflow_dispatch:
+    # Minimal input surface for smoke testing this repo only.
+    # Real consumers (e.g. ui-myfinance) use the workflow_call trigger above,
+    # which exposes the full set of inputs.
     inputs:
       validation-command:
-        description: 'Shell command run after each merge (required when mode=batch).'
-        required: false
+        description: 'Shell command run after each merge.'
+        required: true
         type: string
-        default: ''
+        default: 'echo "smoke test"'
       mode:
         description: 'Operation mode.'
         required: false
@@ -62,41 +65,6 @@ on:
           - batch
           - close-sources
         default: batch
-      base-branch:
-        required: false
-        type: string
-        default: main
-      integration-branch-prefix:
-        required: false
-        type: string
-        default: chore/dependabot-batch
-      dependabot-author:
-        required: false
-        type: string
-        default: dependabot[bot]
-      on-failure:
-        required: false
-        type: choice
-        options:
-          - skip
-          - revert-commit
-        default: skip
-      re-run-final-suite:
-        required: false
-        type: boolean
-        default: true
-      draft-pr:
-        required: false
-        type: boolean
-        default: true
-      max-prs:
-        required: false
-        type: string
-        default: '20'
-      close-source-prs:
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   run:
