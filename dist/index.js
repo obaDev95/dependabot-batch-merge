@@ -32019,7 +32019,9 @@ class BranchManager {
         const branch = `${prefix}-${dateSuffix}`;
         await this.git.run(['fetch', 'origin', baseBranch]);
         await this.git.run(['checkout', '-B', branch, `origin/${baseBranch}`]);
-        await this.git.run(['push', '-u', 'origin', branch]);
+        // Force-push: the integration branch is ephemeral state owned by the action.
+        // Same-day re-runs must overwrite any prior remote state without rejection.
+        await this.git.run(['push', '-u', '--force', 'origin', branch]);
         return branch;
     }
     async push(branch) {
