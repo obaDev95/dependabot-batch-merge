@@ -1,65 +1,30 @@
 name: Dependabot batch merge
 
+# Centralised orchestrator: dispatched from this repo, operates on a target repo
+# (e.g. Maersk-Global/ui-myfinance) using a PAT with cross-repo permissions.
+#
+# Required repo secrets:
+#   TARGET_REPO_PAT  — PAT with Contents: RW + Pull requests: RW on the target.
+#   NPMRC_CONTENTS   — optional. Full .npmrc contents for private registries.
+#   CURSOR_API_KEY   — optional. Cursor Cloud API key for failure explanations.
+#
+# Access control: configure a GitHub environment with required reviewers
+# (Settings → Environments) and reference it via `environment:` on the job
+# below to gate dispatch on team approval.
+
 on:
-  workflow_call:
-    inputs:
-      validation-command:
-        description: 'Shell command run after each merge (required when mode=batch).'
-        required: false
-        type: string
-      mode:
-        description: '"batch" or "close-sources".'
-        required: false
-        type: string
-        default: batch
-      base-branch:
-        required: false
-        type: string
-        default: main
-      integration-branch-prefix:
-        required: false
-        type: string
-        default: chore/dependabot-batch
-      dependabot-author:
-        required: false
-        type: string
-        default: dependabot[bot]
-      on-failure:
-        required: false
-        type: string
-        default: skip
-      re-run-final-suite:
-        required: false
-        type: string
-        default: 'true'
-      draft-pr:
-        required: false
-        type: string
-        default: 'true'
-      max-prs:
-        required: false
-        type: string
-        default: '20'
-      close-source-prs:
-        required: false
-        type: string
-        default: 'false'
-    secrets:
-      CURSOR_API_KEY:
-        required: false
-      NPMRC_CONTENTS:
-        description: 'Full .npmrc contents (e.g. for private registries). Written to ~/.npmrc before validation runs. No-op if empty.'
-        required: false
   workflow_dispatch:
-    # Minimal input surface for smoke testing this repo only.
-    # Real consumers (e.g. ui-myfinance) use the workflow_call trigger above,
-    # which exposes the full set of inputs.
     inputs:
-      validation-command:
-        description: 'Shell command run after each merge.'
+      target-repo:
+        description: 'Target repository (owner/repo).'
         required: true
         type: string
-        default: 'echo "smoke test"'
+        default: Maersk-Global/ui-myfinance
+      validation-command:
+        description: 'Shell command run after each merge to validate.'
+        required: true
+        type: string
+        default: 'npm ci && npm run typecheck && npm test && npm run build'
       mode:
         description: 'Operation mode.'
         required: false
@@ -72,13 +37,12 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
     steps:
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
+          repository: ${{ inputs.target-repo }}
+          token: ${{ secrets.TARGET_REPO_PAT }}
           fetch-depth: 0
           persist-credentials: true
 
@@ -97,14 +61,8 @@ jobs:
       - name: Run dependabot-batch-merge
         uses: obaDev95/dependabot-batch-merge@main
         with:
+          target-repo: ${{ inputs.target-repo }}
           mode: ${{ inputs.mode }}
           validation-command: ${{ inputs.validation-command }}
-          base-branch: ${{ inputs.base-branch }}
-          integration-branch-prefix: ${{ inputs.integration-branch-prefix }}
-          dependabot-author: ${{ inputs.dependabot-author }}
-          on-failure: ${{ inputs.on-failure }}
-          re-run-final-suite: ${{ inputs.re-run-final-suite }}
-          draft-pr: ${{ inputs.draft-pr }}
-          max-prs: ${{ inputs.max-prs }}
-          close-source-prs: ${{ inputs.close-source-prs }}
           cursor-api-key: ${{ secrets.CURSOR_API_KEY }}
+          github-token: ${{ secrets.TARGET_REPO_PAT }}
