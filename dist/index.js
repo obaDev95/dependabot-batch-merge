@@ -31947,7 +31947,7 @@ class ConfigError extends Error {
 }
 function parseConfig() {
     const mode = parseMode(core.getInput('mode') || 'batch');
-    const { owner, repo } = github.context.repo;
+    const { owner, repo } = resolveTargetRepo();
     const baseBranch = core.getInput('base-branch') || 'main';
     const integrationBranchPrefix = core.getInput('integration-branch-prefix') || 'chore/dependabot-batch';
     if (mode === 'batch') {
@@ -31979,6 +31979,25 @@ function parseConfig() {
         closeSourcePrs: parseBool(core.getInput('close-source-prs'), false),
     };
     return config;
+}
+/**
+ * Determine which repo the action should operate on.
+ *
+ * The `target-repo` input (e.g. "Maersk-Global/ui-myfinance") takes precedence
+ * so the workflow can run from a central orchestrator repo and target a
+ * different one. If omitted, falls back to the repo the workflow is running
+ * in (the original Pattern B behaviour).
+ */
+function resolveTargetRepo() {
+    const targetRepo = core.getInput('target-repo').trim();
+    if (!targetRepo) {
+        return github.context.repo;
+    }
+    const match = /^([^/\s]+)\/([^/\s]+)$/.exec(targetRepo);
+    if (!match) {
+        throw new ConfigError(`target-repo must be in "owner/repo" form, got "${targetRepo}"`);
+    }
+    return { owner: match[1], repo: match[2] };
 }
 function parseMode(raw) {
     if (raw === 'batch' || raw === 'close-sources')
