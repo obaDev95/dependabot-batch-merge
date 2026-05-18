@@ -6,6 +6,10 @@ branding:
   color: 'blue'
 
 inputs:
+  target-repo:
+    description: 'owner/repo of the repository to operate on (e.g. "Maersk-Global/ui-myfinance"). Defaults to the repo the workflow is running in.'
+    required: false
+    default: ''
   mode:
     description: 'Operation mode: "batch" (merge PRs and open batch PR) or "close-sources" (close PASSed source PRs after batch PR merged).'
     required: false
