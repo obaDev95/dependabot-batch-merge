@@ -43,6 +43,23 @@ jobs:
   run:
     runs-on: ubuntu-latest
     steps:
+      # Pre-flight: surface a clear error if the PAT secret is missing.
+      # Without this step, the first failure is the cryptic "Input required and
+      # not supplied: token" from actions/checkout, which doesn't hint that the
+      # underlying cause is an unset repository secret.
+      - name: Verify TARGET_REPO_PAT secret is configured
+        env:
+          TARGET_REPO_PAT: ${{ secrets.TARGET_REPO_PAT }}
+        run: |
+          if [ -z "$TARGET_REPO_PAT" ]; then
+            echo "::error title=TARGET_REPO_PAT not configured::The TARGET_REPO_PAT repository secret is empty or unset on obaDev95/dependabot-batch-merge."
+            echo "::error::Fix: Settings → Secrets and variables → Actions → New repository secret."
+            echo "::error::Name: TARGET_REPO_PAT"
+            echo "::error::Value: a fine-grained PAT (or classic PAT) with Contents: RW + Pull requests: RW on Maersk-Global/ui-myfinance."
+            exit 1
+          fi
+          echo "TARGET_REPO_PAT is present."
+
       - name: Checkout target repository
         uses: actions/checkout@v4
         with:
