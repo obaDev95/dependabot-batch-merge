@@ -8,8 +8,14 @@ name: Dependabot batch merge
 #
 # Required repo secrets:
 #   TARGET_REPO_PAT  — PAT with Contents: RW + Pull requests: RW on
-#                      Maersk-Global/ui-myfinance.
-#   NPMRC_CONTENTS   — optional. Full .npmrc contents for private registries.
+#                      Maersk-Global/ui-myfinance, AND Packages: Read on every
+#                      Maersk-Global repo publishing a private npm package
+#                      consumed by ui-myfinance (classic PAT alternative:
+#                      read:packages for the org). Required for the action's
+#                      internal `npm ci` to authenticate against
+#                      npm.pkg.github.com — without it, every PR fails
+#                      validation with HTTP 401 "authentication token not
+#                      provided".
 #   CURSOR_API_KEY   — optional. Cursor Cloud API key for failure explanations.
 
 on:
@@ -42,6 +48,12 @@ on:
 jobs:
   run:
     runs-on: ubuntu-latest
+    # Job-level so the env propagates into the dependabot-batch-merge action's
+    # child shell when it runs `bash -lc <validation-command>` (i.e. npm ci).
+    # Without this, the .npmrc below references ${NODE_AUTH_TOKEN} but the
+    # variable is unset inside the action's subprocess and npm 401s.
+    env:
+      NODE_AUTH_TOKEN: ${{ secrets.TARGET_REPO_PAT }}
     steps:
       # Pre-flight: surface a clear error if the PAT secret is missing.
       # Without this step, the first failure is the cryptic "Input required and
@@ -68,17 +80,43 @@ jobs:
           fetch-depth: 0
           persist-credentials: true
 
-      - name: Set up .npmrc (if NPMRC_CONTENTS provided)
-        env:
-          NPMRC_CONTENTS: ${{ secrets.NPMRC_CONTENTS }}
+      # Mirror the auth pattern used by Maersk-Global/sync-myf-schemas
+      # (.github/actions/setup-myf-runner): resolve Node from the target
+      # repo's .nvmrc, write a GPR-scoped userconfig referencing
+      # ${NODE_AUTH_TOKEN}, and export the userconfig path via $GITHUB_ENV
+      # so the dependabot-batch-merge action's internal `npm ci` picks it up.
+      - name: Resolve Node version
+        id: nodever
         run: |
-          if [ -n "$NPMRC_CONTENTS" ]; then
-            printf '%s' "$NPMRC_CONTENTS" > "$HOME/.npmrc"
-            chmod 600 "$HOME/.npmrc"
-            echo "Wrote ~/.npmrc ($(wc -c < "$HOME/.npmrc") bytes)"
+          set -euo pipefail
+          if [ -f .nvmrc ]; then
+            echo "version=$(cat .nvmrc)" >> "$GITHUB_OUTPUT"
           else
-            echo "No NPMRC_CONTENTS secret provided — skipping npmrc setup"
+            echo "version=lts/*" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ steps.nodever.outputs.version }}
+
+      - name: Configure npm for GitHub Packages (Maersk scopes)
+        run: |
+          set -euo pipefail
+          if [ -z "${NODE_AUTH_TOKEN}" ]; then
+            echo "::error::TARGET_REPO_PAT is empty — cannot authenticate to npm.pkg.github.com."
+            exit 1
+          fi
+          NPMRC="${RUNNER_TEMP}/gh-packages.npmrc"
+          # ui-myfinance pulls both @maersk-global/* and @Maersk-Global/* from GPR;
+          # one scope line alone leaves the other without a token. ${NODE_AUTH_TOKEN}
+          # is expanded by npm from the environment (secret never echoed).
+          {
+            echo '@maersk-global:registry=https://npm.pkg.github.com'
+            echo '@Maersk-Global:registry=https://npm.pkg.github.com'
+            echo '//npm.pkg.github.com/:_authToken=${NODE_AUTH_TOKEN}'
+          } > "$NPMRC"
+          echo "NPM_CONFIG_USERCONFIG=$NPMRC" >> "$GITHUB_ENV"
 
       - name: Run dependabot-batch-merge
         uses: obaDev95/dependabot-batch-merge@main
