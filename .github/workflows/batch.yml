@@ -33,6 +33,11 @@ on:
           - batch
           - close-sources
         default: batch
+      close-source-prs:
+        description: 'When mode=close-sources, close the PASSed source Dependabot PRs with a "Superseded by" comment. Ignored in mode=batch.'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   run:
@@ -64,5 +69,6 @@ jobs:
           target-repo: ${{ inputs.target-repo }}
           mode: ${{ inputs.mode }}
           validation-command: ${{ inputs.validation-command }}
+          close-source-prs: ${{ inputs.close-source-prs && 'true' || 'false' }}
           cursor-api-key: ${{ secrets.CURSOR_API_KEY }}
           github-token: ${{ secrets.TARGET_REPO_PAT }}

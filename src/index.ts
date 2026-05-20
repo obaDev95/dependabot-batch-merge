@@ -24,8 +24,8 @@ async function main(): Promise<void> {
 
   if (config.mode === 'batch') {
     const summary = await runBatch(config, gh);
-    core.setOutput('batch-pr-number', summary.batchPrNumber);
-    core.setOutput('batch-pr-url', summary.batchPrUrl);
+    core.setOutput('batch-pr-number', summary.batchPrNumber ?? '');
+    core.setOutput('batch-pr-url', summary.batchPrUrl ?? '');
     core.setOutput('pass-count', summary.results.filter((r) => r.status === 'PASS').length);
     core.setOutput('fail-count', summary.results.filter((r) => r.status === 'FAIL').length);
     return;

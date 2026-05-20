@@ -66,8 +66,8 @@ export interface FailureExplanation {
 }
 
 export interface BatchSummary {
-  batchPrNumber: number;
-  batchPrUrl: string;
+  batchPrNumber?: number;
+  batchPrUrl?: string;
   results: PRResult[];
   finalSuite?: ValidationOutcome;
 }

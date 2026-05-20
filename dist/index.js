@@ -32248,17 +32248,31 @@ class BatchOrchestrator {
         core.info(`Integration branch: ${integrationBranch}`);
         const candidates = await this.prLister.extractOpenPullRequests(config.dependabotAuthor, config.maxPrs);
         core.info(`Found ${candidates.length} open Dependabot PR(s)`);
-        const batchPr = await this.openInitialBatchPr(integrationBranch, config, candidates.length);
+        // Reuse an existing same-day PR if present; otherwise defer creation until
+        // the integration branch has at least one commit ahead of base. GitHub
+        // returns 422 "No commits between base and head" when opening a PR against
+        // an empty branch, which happens on the first run of a new day before any
+        // candidate has been merged.
+        let batchPr = await this.prWriter.findExistingPr(integrationBranch, config.baseBranch);
+        if (batchPr) {
+            core.info(`Reusing existing batch PR #${batchPr.number}`);
+            await this.prWriter.updatePrBody(batchPr.number, this.placeholderBody(integrationBranch, config, candidates.length));
+        }
         const results = [];
         for (const pr of candidates) {
             core.startGroup(`Processing PR #${pr.number} — ${pr.title}`);
-            const result = await this.processPr(pr, config, integrationBranch);
+            const { result, pushed } = await this.processPr(pr, config, integrationBranch);
             results.push(result);
-            await this.prWriter.updatePrBody(batchPr.number, this.reporter.build({
-                integrationBranch,
-                baseBranch: config.baseBranch,
-                results,
-            }));
+            if (pushed && !batchPr) {
+                batchPr = await this.openBatchPr(integrationBranch, config);
+            }
+            if (batchPr) {
+                await this.prWriter.updatePrBody(batchPr.number, this.reporter.build({
+                    integrationBranch,
+                    baseBranch: config.baseBranch,
+                    results,
+                }));
+            }
             core.endGroup();
         }
         let finalSuite;
@@ -32266,22 +32280,24 @@ class BatchOrchestrator {
             core.info('Running final validation on integration branch tip');
             finalSuite = await this.validator.run();
         }
-        await this.prWriter.updatePrBody(batchPr.number, this.reporter.build({
-            integrationBranch,
-            baseBranch: config.baseBranch,
-            results,
-            finalSuite,
-        }));
-        if (!config.draftPr) {
-            await this.prWriter.markPrAsReady(batchPr.number);
+        if (batchPr) {
+            await this.prWriter.updatePrBody(batchPr.number, this.reporter.build({
+                integrationBranch,
+                baseBranch: config.baseBranch,
+                results,
+                finalSuite,
+            }));
+            if (!config.draftPr) {
+                await this.prWriter.markPrAsReady(batchPr.number);
+            }
+        }
+        else {
+            core.info('No commits landed on the integration branch — no batch PR opened.');
         }
         return {
-            batchPrNumber: batchPr.number,
-            batchPrUrl: batchPr.url,
+            ...(batchPr && { batchPrNumber: batchPr.number, batchPrUrl: batchPr.url }),
             results,
-            ...(finalSuite && {
-                finalSuite,
-            }),
+            ...(finalSuite && { finalSuite }),
         };
     }
     async processPr(pr, config, integrationBranch) {
@@ -32290,52 +32306,57 @@ class BatchOrchestrator {
         if (mergeOutcome.kind === 'conflict') {
             core.warning(`Merge conflict for PR #${pr.number}`);
             return {
-                pr,
-                status: 'FAIL',
-                failure: { kind: 'merge-conflict', files: mergeOutcome.conflictedFiles ?? [] },
+                result: {
+                    pr,
+                    status: 'FAIL',
+                    failure: { kind: 'merge-conflict', files: mergeOutcome.conflictedFiles ?? [] },
+                },
+                pushed: false,
             };
         }
         const validation = await this.validator.run();
         if (validation.passed) {
             await this.branchManager.push(integrationBranch);
             core.info(`PR #${pr.number} PASS`);
-            return { pr, status: 'PASS' };
+            return { result: { pr, status: 'PASS' }, pushed: true };
         }
         core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
         const explanation = await this.analyzer.explain({ pr, validation });
         await this.merger.dropLastMerge(config.onFailure, pr);
+        let pushed = false;
         if (config.onFailure === 'revert-commit') {
             await this.branchManager.push(integrationBranch);
+            pushed = true;
         }
         return {
-            pr,
-            status: 'FAIL',
-            failure: {
-                kind: 'validation-failed',
-                summary: explanation.summary,
-                details: explanation.body,
+            result: {
+                pr,
+                status: 'FAIL',
+                failure: {
+                    kind: 'validation-failed',
+                    summary: explanation.summary,
+                    details: explanation.body,
+                },
             },
+            pushed,
         };
     }
-    async openInitialBatchPr(integrationBranch, config, candidateCount) {
+    placeholderBody(integrationBranch, config, candidateCount) {
         const initialBody = this.reporter.build({
             integrationBranch,
             baseBranch: config.baseBranch,
             results: [],
         });
-        const placeholderBody = candidateCount === 0
+        return candidateCount === 0
             ? initialBody
             : `${initialBody}\n\n_Processing ${candidateCount} PR(s)…_`;
-        const existing = await this.prWriter.findExistingPr(integrationBranch, config.baseBranch);
-        if (existing) {
-            await this.prWriter.updatePrBody(existing.number, placeholderBody);
-            return existing;
-        }
+    }
+    async openBatchPr(integrationBranch, config) {
         return this.prWriter.createPr({
             head: integrationBranch,
             base: config.baseBranch,
             title: `chore(deps): batch Dependabot updates (${integrationBranch})`,
-            body: placeholderBody,
+            body: this.placeholderBody(integrationBranch, config, 0),
             draft: true,
         });
     }
@@ -32400,8 +32421,8 @@ async function main() {
     const gh = new GitHubClient(token, config.owner, config.repo);
     if (config.mode === 'batch') {
         const summary = await runBatch(config, gh);
-        core.setOutput('batch-pr-number', summary.batchPrNumber);
-        core.setOutput('batch-pr-url', summary.batchPrUrl);
+        core.setOutput('batch-pr-number', summary.batchPrNumber ?? '');
+        core.setOutput('batch-pr-url', summary.batchPrUrl ?? '');
         core.setOutput('pass-count', summary.results.filter((r) => r.status === 'PASS').length);
         core.setOutput('fail-count', summary.results.filter((r) => r.status === 'FAIL').length);
         return;

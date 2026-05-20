@@ -38,21 +38,43 @@ export class BatchOrchestrator {
     );
     core.info(`Found ${candidates.length} open Dependabot PR(s)`);
 
-    const batchPr = await this.openInitialBatchPr(integrationBranch, config, candidates.length);
+    // Reuse an existing same-day PR if present; otherwise defer creation until
+    // the integration branch has at least one commit ahead of base. GitHub
+    // returns 422 "No commits between base and head" when opening a PR against
+    // an empty branch, which happens on the first run of a new day before any
+    // candidate has been merged.
+    let batchPr: BatchPRRef | null = await this.prWriter.findExistingPr(
+      integrationBranch,
+      config.baseBranch,
+    );
+    if (batchPr) {
+      core.info(`Reusing existing batch PR #${batchPr.number}`);
+      await this.prWriter.updatePrBody(
+        batchPr.number,
+        this.placeholderBody(integrationBranch, config, candidates.length),
+      );
+    }
+
     const results: PRResult[] = [];
 
     for (const pr of candidates) {
       core.startGroup(`Processing PR #${pr.number} — ${pr.title}`);
-      const result = await this.processPr(pr, config, integrationBranch);
+      const { result, pushed } = await this.processPr(pr, config, integrationBranch);
       results.push(result);
-      await this.prWriter.updatePrBody(
-        batchPr.number,
-        this.reporter.build({
-          integrationBranch,
-          baseBranch: config.baseBranch,
-          results,
-        }),
-      );
+
+      if (pushed && !batchPr) {
+        batchPr = await this.openBatchPr(integrationBranch, config);
+      }
+      if (batchPr) {
+        await this.prWriter.updatePrBody(
+          batchPr.number,
+          this.reporter.build({
+            integrationBranch,
+            baseBranch: config.baseBranch,
+            results,
+          }),
+        );
+      }
       core.endGroup();
     }
 
@@ -62,27 +84,27 @@ export class BatchOrchestrator {
       finalSuite = await this.validator.run();
     }
 
-    await this.prWriter.updatePrBody(
-      batchPr.number,
-      this.reporter.build({
-        integrationBranch,
-        baseBranch: config.baseBranch,
-        results,
-        finalSuite,
-      }),
-    );
-
-    if (!config.draftPr) {
-      await this.prWriter.markPrAsReady(batchPr.number);
+    if (batchPr) {
+      await this.prWriter.updatePrBody(
+        batchPr.number,
+        this.reporter.build({
+          integrationBranch,
+          baseBranch: config.baseBranch,
+          results,
+          finalSuite,
+        }),
+      );
+      if (!config.draftPr) {
+        await this.prWriter.markPrAsReady(batchPr.number);
+      }
+    } else {
+      core.info('No commits landed on the integration branch — no batch PR opened.');
     }
 
     return {
-      batchPrNumber: batchPr.number,
-      batchPrUrl: batchPr.url,
+      ...(batchPr && { batchPrNumber: batchPr.number, batchPrUrl: batchPr.url }),
       results,
-      ...(finalSuite && {
-        finalSuite,
-      }),
+      ...(finalSuite && { finalSuite }),
     };
   }
 
@@ -90,16 +112,19 @@ export class BatchOrchestrator {
     pr: DependabotPR,
     config: BatchConfig,
     integrationBranch: string,
-  ): Promise<PRResult> {
+  ): Promise<{ result: PRResult; pushed: boolean }> {
     await this.branchManager.fetchPr(pr.headRef);
 
     const mergeOutcome = await this.merger.merge(pr);
     if (mergeOutcome.kind === 'conflict') {
       core.warning(`Merge conflict for PR #${pr.number}`);
       return {
-        pr,
-        status: 'FAIL',
-        failure: { kind: 'merge-conflict', files: mergeOutcome.conflictedFiles ?? [] },
+        result: {
+          pr,
+          status: 'FAIL',
+          failure: { kind: 'merge-conflict', files: mergeOutcome.conflictedFiles ?? [] },
+        },
+        pushed: false,
       };
     }
 
@@ -107,52 +132,55 @@ export class BatchOrchestrator {
     if (validation.passed) {
       await this.branchManager.push(integrationBranch);
       core.info(`PR #${pr.number} PASS`);
-      return { pr, status: 'PASS' };
+      return { result: { pr, status: 'PASS' }, pushed: true };
     }
 
     core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
     const explanation = await this.analyzer.explain({ pr, validation });
     await this.merger.dropLastMerge(config.onFailure, pr);
+    let pushed = false;
     if (config.onFailure === 'revert-commit') {
       await this.branchManager.push(integrationBranch);
+      pushed = true;
     }
     return {
-      pr,
-      status: 'FAIL',
-      failure: {
-        kind: 'validation-failed',
-        summary: explanation.summary,
-        details: explanation.body,
+      result: {
+        pr,
+        status: 'FAIL',
+        failure: {
+          kind: 'validation-failed',
+          summary: explanation.summary,
+          details: explanation.body,
+        },
       },
+      pushed,
     };
   }
 
-  private async openInitialBatchPr(
+  private placeholderBody(
     integrationBranch: string,
     config: BatchConfig,
     candidateCount: number,
-  ): Promise<BatchPRRef> {
+  ): string {
     const initialBody = this.reporter.build({
       integrationBranch,
       baseBranch: config.baseBranch,
       results: [],
     });
-    const placeholderBody =
-      candidateCount === 0
-        ? initialBody
-        : `${initialBody}\n\n_Processing ${candidateCount} PR(s)…_`;
+    return candidateCount === 0
+      ? initialBody
+      : `${initialBody}\n\n_Processing ${candidateCount} PR(s)…_`;
+  }
 
-    const existing = await this.prWriter.findExistingPr(integrationBranch, config.baseBranch);
-    if (existing) {
-      await this.prWriter.updatePrBody(existing.number, placeholderBody);
-      return existing;
-    }
-
+  private async openBatchPr(
+    integrationBranch: string,
+    config: BatchConfig,
+  ): Promise<BatchPRRef> {
     return this.prWriter.createPr({
       head: integrationBranch,
       base: config.baseBranch,
       title: `chore(deps): batch Dependabot updates (${integrationBranch})`,
-      body: placeholderBody,
+      body: this.placeholderBody(integrationBranch, config, 0),
       draft: true,
     });
   }
