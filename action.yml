@@ -7,9 +7,8 @@ branding:
 
 inputs:
   target-repo:
-    description: 'owner/repo of the repository to operate on (e.g. "Maersk-Global/ui-myfinance"). Defaults to the repo the workflow is running in.'
-    required: false
-    default: ''
+    description: 'owner/repo of the repository to operate on. v1 is hard-locked to "Maersk-Global/ui-myfinance"; any other value fails fast in config parsing. Onboarding additional repos requires a code change.'
+    required: true
   mode:
     description: 'Operation mode: "batch" (merge PRs and open batch PR) or "close-sources" (close PASSed source PRs after batch PR merged).'
     required: false

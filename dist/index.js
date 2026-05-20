@@ -31938,13 +31938,11 @@ class CloseSourcesOrchestrator {
     }
 }
 
-// EXTERNAL MODULE: ./node_modules/@actions/github/lib/github.js
-var github = __nccwpck_require__(3228);
 ;// CONCATENATED MODULE: ./src/config.ts
-
 
 class ConfigError extends Error {
 }
+const V1_ALLOWED_TARGET_REPO = 'Maersk-Global/ui-myfinance';
 function parseConfig() {
     const mode = parseMode(core.getInput('mode') || 'batch');
     const { owner, repo } = resolveTargetRepo();
@@ -31980,24 +31978,17 @@ function parseConfig() {
     };
     return config;
 }
-/**
- * Determine which repo the action should operate on.
- *
- * The `target-repo` input (e.g. "Maersk-Global/ui-myfinance") takes precedence
- * so the workflow can run from a central orchestrator repo and target a
- * different one. If omitted, falls back to the repo the workflow is running
- * in (the original Pattern B behaviour).
- */
+// v1 is hard-locked to a single target repository. Onboarding other teams is
+// a deliberate follow-up — it requires a code change here (and a fresh release)
+// so any expansion of scope is reviewed, not implicit.
 function resolveTargetRepo() {
     const targetRepo = core.getInput('target-repo').trim();
-    if (!targetRepo) {
-        return github.context.repo;
+    if (targetRepo !== V1_ALLOWED_TARGET_REPO) {
+        throw new ConfigError(`target-repo must be "${V1_ALLOWED_TARGET_REPO}" in v1 (got "${targetRepo}"). ` +
+            `Onboarding additional repositories is a separate change.`);
     }
-    const match = /^([^/\s]+)\/([^/\s]+)$/.exec(targetRepo);
-    if (!match) {
-        throw new ConfigError(`target-repo must be in "owner/repo" form, got "${targetRepo}"`);
-    }
-    return { owner: match[1], repo: match[2] };
+    const [owner, repo] = V1_ALLOWED_TARGET_REPO.split('/');
+    return { owner, repo };
 }
 function parseMode(raw) {
     if (raw === 'batch' || raw === 'close-sources')
@@ -32122,6 +32113,8 @@ class PRMerger {
     }
 }
 
+// EXTERNAL MODULE: ./node_modules/@actions/github/lib/github.js
+var github = __nccwpck_require__(3228);
 ;// CONCATENATED MODULE: ./src/github/client.ts
 
 class GitHubClient {

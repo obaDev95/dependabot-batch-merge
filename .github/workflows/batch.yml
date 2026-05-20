@@ -1,25 +1,25 @@
 name: Dependabot batch merge
 
-# Centralised orchestrator: dispatched from this repo, operates on whichever
-# target repo the dispatcher specifies. The TARGET_REPO_PAT must have access
-# to that repo. Not scoped to any single project.
+# Centralised orchestrator: dispatched from this repo, operates on the
+# Maersk-Global/ui-myfinance repository. v1 is hard-locked to that single
+# target — the action's config parser rejects any other target-repo value.
+# Onboarding additional teams is a deliberate follow-up that requires a
+# code change here (and a new release tag).
 #
 # Required repo secrets:
-#   TARGET_REPO_PAT  — PAT with Contents: RW + Pull requests: RW on the target(s).
+#   TARGET_REPO_PAT  — PAT with Contents: RW + Pull requests: RW on
+#                      Maersk-Global/ui-myfinance.
 #   NPMRC_CONTENTS   — optional. Full .npmrc contents for private registries.
 #   CURSOR_API_KEY   — optional. Cursor Cloud API key for failure explanations.
-#
-# Access control: configure a GitHub environment with required reviewers
-# (Settings → Environments) and reference it via `environment:` on the job
-# below to gate dispatch on team approval.
 
 on:
   workflow_dispatch:
     inputs:
       target-repo:
-        description: 'Target repository in owner/repo form (e.g. Maersk-Global/ui-myfinance).'
+        description: 'Target repository. v1 only accepts "Maersk-Global/ui-myfinance"; any other value will be rejected by the action.'
         required: true
         type: string
+        default: 'Maersk-Global/ui-myfinance'
       validation-command:
         description: 'Shell command run after each merge to validate.'
         required: true

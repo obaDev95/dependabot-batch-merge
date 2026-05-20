@@ -1,8 +1,9 @@
 import * as core from '@actions/core';
-import * as github from '@actions/github';
 import type { BatchConfig, CloseSourcesConfig, FailureHandling, Mode, RunConfig } from './types';
 
 export class ConfigError extends Error {}
+
+const V1_ALLOWED_TARGET_REPO = 'Maersk-Global/ui-myfinance';
 
 export function parseConfig(): RunConfig {
   const mode = parseMode(core.getInput('mode') || 'batch');
@@ -44,26 +45,19 @@ export function parseConfig(): RunConfig {
   return config;
 }
 
-/**
- * Determine which repo the action should operate on.
- *
- * The `target-repo` input (e.g. "Maersk-Global/ui-myfinance") takes precedence
- * so the workflow can run from a central orchestrator repo and target a
- * different one. If omitted, falls back to the repo the workflow is running
- * in (the original Pattern B behaviour).
- */
+// v1 is hard-locked to a single target repository. Onboarding other teams is
+// a deliberate follow-up — it requires a code change here (and a fresh release)
+// so any expansion of scope is reviewed, not implicit.
 function resolveTargetRepo(): { owner: string; repo: string } {
   const targetRepo = core.getInput('target-repo').trim();
-  if (!targetRepo) {
-    return github.context.repo;
-  }
-  const match = /^([^/\s]+)\/([^/\s]+)$/.exec(targetRepo);
-  if (!match) {
+  if (targetRepo !== V1_ALLOWED_TARGET_REPO) {
     throw new ConfigError(
-      `target-repo must be in "owner/repo" form, got "${targetRepo}"`,
+      `target-repo must be "${V1_ALLOWED_TARGET_REPO}" in v1 (got "${targetRepo}"). ` +
+        `Onboarding additional repositories is a separate change.`,
     );
   }
-  return { owner: match[1]!, repo: match[2]! };
+  const [owner, repo] = V1_ALLOWED_TARGET_REPO.split('/') as [string, string];
+  return { owner, repo };
 }
 
 function parseMode(raw: string): Mode {
