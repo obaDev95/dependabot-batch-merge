@@ -31692,21 +31692,155 @@ var __webpack_exports__ = {};
 
 // EXTERNAL MODULE: ./node_modules/@actions/core/lib/core.js
 var core = __nccwpck_require__(7484);
+;// CONCATENATED MODULE: ./src/analysis/categorize.ts
+const LABELS = {
+    'npm-auth-401': 'npm 401 (auth missing)',
+    'npm-forbidden-403': 'npm 403 (insufficient scope)',
+    'lockfile-drift': 'lockfile drift',
+    'peer-dep-conflict': 'peer dependency conflict',
+    'missing-module': 'missing module',
+    'type-error': 'type error',
+    'test-failure': 'test failure',
+    'install-error': 'install error',
+    'build-error': 'build error',
+    unknown: 'unknown',
+};
+const RULES = [
+    {
+        category: 'npm-auth-401',
+        test: /401 Unauthorized[\s\S]*?npm\.pkg\.github\.com|authentication token not provided/i,
+        refine: (text) => {
+            const m = text.match(/GET\s+(https:\/\/npm\.pkg\.github\.com\/\S+)/);
+            return m
+                ? `npm.pkg.github.com 401 fetching ${m[1]} — runner has no auth token`
+                : 'npm.pkg.github.com 401 — runner has no auth token';
+        },
+    },
+    {
+        category: 'npm-forbidden-403',
+        test: /403 Forbidden[\s\S]*?npm\.pkg\.github\.com|does not match expected scopes/i,
+        refine: (text) => {
+            const m = text.match(/GET\s+(https:\/\/npm\.pkg\.github\.com\/\S+)/);
+            return m
+                ? `npm.pkg.github.com 403 fetching ${m[1]} — PAT lacks Packages:Read on publisher repo`
+                : 'npm.pkg.github.com 403 — PAT lacks Packages:Read on publisher repo';
+        },
+    },
+    {
+        category: 'lockfile-drift',
+        test: /npm ci can only install packages when your package\.json and package-lock\.json|EUSAGE\b[\s\S]*?package-lock\.json/i,
+        refine: () => 'package.json and package-lock.json are out of sync',
+    },
+    {
+        category: 'peer-dep-conflict',
+        test: /ERESOLVE|EPEERINVALID|peer dep(?:endency)? (?:missing|conflict)/i,
+        refine: (text) => {
+            const m = text.match(/peer\s+(\S+@\S+)/i);
+            return m ? `peer dependency conflict on ${m[1]}` : 'peer dependency conflict (ERESOLVE)';
+        },
+    },
+    {
+        category: 'missing-module',
+        test: /Cannot find module ['"]([^'"]+)['"]|Module not found:[\s\S]*?['"]([^'"]+)['"]/i,
+        refine: (text) => {
+            const m = text.match(/Cannot find module ['"]([^'"]+)['"]/) ??
+                text.match(/Module not found:[\s\S]*?['"]([^'"]+)['"]/);
+            return m ? `cannot resolve "${m[1]}"` : 'cannot resolve a module import';
+        },
+    },
+    {
+        category: 'type-error',
+        test: /\berror TS\d+:/,
+        refine: (text) => {
+            const m = text.match(/(\S+\.(?:ts|vue|tsx))(?::\d+:\d+)?\s*-\s*error TS\d+:\s*([^\n]+)/);
+            if (m && m[1] && m[2])
+                return `TS error in ${m[1]}: ${m[2].trim()}`;
+            return 'TypeScript compilation failed';
+        },
+    },
+    {
+        category: 'test-failure',
+        test: /\bTests?\s*:?\s*\d+\s*failed|^FAIL\s|\b\d+\s+failing\b|AssertionError\b/im,
+        refine: (text) => {
+            const vitest = text.match(/Tests?\s*:?\s*(\d+)\s*failed[^,\n]*(?:,\s*(\d+)\s*passed)?/i);
+            if (vitest) {
+                const failed = vitest[1];
+                const passed = vitest[2];
+                return passed
+                    ? `${failed} test(s) failed (${passed} passed)`
+                    : `${failed} test(s) failed`;
+            }
+            const file = text.match(/^FAIL\s+(\S+)/m);
+            return file ? `test file failed: ${file[1]}` : 'one or more tests failed';
+        },
+    },
+    {
+        category: 'install-error',
+        test: /^npm (?:ERR!|error)\s/m,
+        refine: (text) => {
+            const codeMatch = text.match(/npm (?:ERR!|error) code (E[A-Z]+)/);
+            const msgMatch = text.match(/npm (?:ERR!|error)\s+([^\n]+)/);
+            const code = codeMatch?.[1];
+            const msg = msgMatch?.[1]?.trim();
+            if (code && msg)
+                return `npm ${code}: ${truncate(msg, 140)}`;
+            if (code)
+                return `npm ${code}`;
+            if (msg)
+                return `npm error: ${truncate(msg, 140)}`;
+            return 'npm install failed';
+        },
+    },
+    {
+        category: 'build-error',
+        test: /\bvite build\b[\s\S]*?error|Rollup\s+failed|Build failed/i,
+        refine: () => 'production build failed',
+    },
+];
+function categorizeFailure(validation) {
+    const text = `${validation.stderrTail || ''}\n${validation.stdoutTail || ''}`;
+    for (const rule of RULES) {
+        if (rule.test.test(text)) {
+            const cause = rule.refine?.(text) ?? LABELS[rule.category];
+            return { category: rule.category, label: LABELS[rule.category], cause };
+        }
+    }
+    return {
+        category: 'unknown',
+        label: LABELS.unknown,
+        cause: `validation exited with code ${validation.exitCode}`,
+    };
+}
+function truncate(s, max) {
+    return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+}
+
 ;// CONCATENATED MODULE: ./src/analysis/analyzer.ts
+
 class StaticFailureAnalyzer {
     async explain({ pr, validation }) {
+        const { category, label, cause } = categorizeFailure(validation);
+        const tail = validation.stderrTail || validation.stdoutTail || '(no output captured)';
         return {
-            summary: `validation exited with code ${validation.exitCode}`,
-            body: `Validation command failed for PR #${pr.number} (${pr.title}).\n\n` +
-                `Exit code: ${validation.exitCode}\n\n` +
+            category,
+            categoryLabel: label,
+            cause,
+            exitCode: validation.exitCode,
+            summary: cause,
+            body: `**Category:** ${label}\n` +
+                `**Cause:** ${cause}\n` +
+                `**Exit code:** ${validation.exitCode}\n` +
+                `**PR:** #${pr.number} — ${pr.title}\n\n` +
+                '<details><summary>Validation output (tail)</summary>\n\n' +
                 '```\n' +
-                (validation.stderrTail || validation.stdoutTail) +
-                '\n```',
+                tail +
+                '\n```\n\n</details>',
         };
     }
 }
 
 ;// CONCATENATED MODULE: ./src/analysis/cursor-analyzer.ts
+
 
 
 // NOTE: The exact Cursor Cloud / Background Agents API surface should be confirmed against
@@ -31725,10 +31859,15 @@ class CursorFailureAnalyzer {
         this.fetchImpl = opts.fetchImpl ?? fetch;
     }
     async explain(input) {
+        const { category, label, cause } = categorizeFailure(input.validation);
         try {
             const text = await this.callCursor(this.buildPrompt(input));
             return {
-                summary: firstLine(text) || `validation exited with code ${input.validation.exitCode}`,
+                category,
+                categoryLabel: label,
+                cause,
+                exitCode: input.validation.exitCode,
+                summary: firstLine(text) || cause,
                 body: text,
             };
         }
@@ -31788,15 +31927,34 @@ function firstLine(text) {
 ;// CONCATENATED MODULE: ./src/report/builder.ts
 const PASSED_PRS_BLOCK_START = '<!-- dependabot-batch-merge:passed-prs:start -->';
 const PASSED_PRS_BLOCK_END = '<!-- dependabot-batch-merge:passed-prs:end -->';
+// Documentation rendered alongside each failure category so reviewers don't
+// have to reverse-engineer what "npm 401" or "lockfile drift" means in this
+// repository's context.
+const CATEGORY_DESCRIPTIONS = {
+    'npm-auth-401': 'The runner has no credentials for `npm.pkg.github.com`. Check the workflow\'s GitHub Packages auth setup (`NODE_AUTH_TOKEN` env + `NPM_CONFIG_USERCONFIG`).',
+    'npm-forbidden-403': '`TARGET_REPO_PAT` (or whichever PAT feeds `NODE_AUTH_TOKEN`) lacks `Packages: Read` on the package\'s publisher repo, or the PAT is not SSO-authorized for the org.',
+    'lockfile-drift': '`npm ci` refuses to install because `package.json` and `package-lock.json` disagree. Regenerate the lockfile against the Dependabot bump and re-run.',
+    'peer-dep-conflict': 'npm cannot resolve a peer dependency requirement. Either pin a compatible version or accept the Dependabot upgrade alongside its peer.',
+    'missing-module': 'An import points at a module that isn\'t resolvable from the installed dependency tree. Likely a stale import after a package rename or a removed export.',
+    'type-error': 'TypeScript compilation failed. Usually a breaking API change in the bumped package — update the call site.',
+    'test-failure': 'Unit/component tests failed after the merge. The bump may have changed runtime behavior; inspect the failing spec.',
+    'install-error': 'An npm install step failed for a reason that doesn\'t match the more specific categories above. Read the tail for the exact error code.',
+    'build-error': 'Production build (`vite build` / rollup) failed after the merge.',
+    unknown: 'No known failure pattern matched the validation output. Inspect the tail manually.',
+    'merge-conflict': 'The Dependabot branch conflicts with another change already on the integration branch (often another Dependabot PR that touched the same lockfile).',
+};
 class ReportBuilder {
     build(params) {
         const passed = params.results.filter((r) => r.status === 'PASS');
         const failed = params.results.filter((r) => r.status === 'FAIL');
+        const categoryCounts = countFailureCategories(failed);
         return [
             `## Dependabot batch merge`,
             ``,
             `Integration branch: \`${params.integrationBranch}\` → \`${params.baseBranch}\``,
             `Processed: **${params.results.length}** · PASS: **${passed.length}** · FAIL: **${failed.length}**`,
+            ``,
+            this.categoryOverview(categoryCounts, failed.length),
             ``,
             this.summaryTable(params.results),
             ``,
@@ -31820,40 +31978,103 @@ class ReportBuilder {
             .map((token) => Number.parseInt(token, 10))
             .filter((n) => Number.isInteger(n) && n > 0);
     }
+    categoryOverview(counts, totalFailed) {
+        if (totalFailed === 0)
+            return '';
+        const lines = ['### Failure breakdown', '', '| Category | Count | What it means |', '| --- | ---: | --- |'];
+        const entries = [...counts.entries()].sort((a, b) => b[1].count - a[1].count);
+        for (const [key, { label, count }] of entries) {
+            const description = CATEGORY_DESCRIPTIONS[key] ?? '';
+            lines.push(`| ${escapePipes(label)} | ${count} | ${escapePipes(description)} |`);
+        }
+        return lines.join('\n');
+    }
     summaryTable(results) {
         if (results.length === 0)
             return '_No Dependabot PRs were processed._';
-        const header = '| PR | Title | Result | Notes |\n| --- | --- | --- | --- |';
+        const header = '| PR | Title | Result | Category | Notes |\n| --- | --- | --- | --- | --- |';
         const rows = results.map((r) => {
-            const note = r.status === 'PASS'
-                ? ''
-                : r.failure?.kind === 'merge-conflict'
-                    ? `merge conflict (${r.failure.files.length} file(s))`
-                    : (r.failure?.summary ?? 'see details below');
             const icon = r.status === 'PASS' ? '✅' : '❌';
-            return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(note)} |`;
+            let category = '';
+            let note = '';
+            if (r.status === 'PASS') {
+                category = '—';
+            }
+            else if (r.failure?.kind === 'merge-conflict') {
+                category = 'merge conflict';
+                note = `${r.failure.files.length} file(s) conflicted`;
+            }
+            else if (r.failure?.kind === 'validation-failed') {
+                category = r.failure.categoryLabel;
+                note = `exit ${r.failure.exitCode}: ${r.failure.cause}`;
+            }
+            return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(category)} | ${escapePipes(note)} |`;
         });
         return [header, ...rows].join('\n');
     }
     failureSection(failed) {
         if (failed.length === 0)
             return '';
-        const sections = failed.map((r) => {
-            const heading = `### ❌ #${r.pr.number} — ${r.pr.title}`;
-            if (r.failure?.kind === 'merge-conflict') {
-                return [
-                    heading,
-                    ``,
-                    `Merge conflict in:`,
-                    ...r.failure.files.map((f) => `- \`${f}\``),
-                ].join('\n');
-            }
-            if (r.failure?.kind === 'validation-failed') {
-                return [heading, ``, r.failure.details].join('\n');
-            }
-            return heading;
-        });
-        return ['## Failures', ...sections].join('\n\n');
+        // Group by category so reviewers see "37 PRs failed on npm 401" as one
+        // section instead of scrolling through 37 nearly-identical traces.
+        const grouped = new Map();
+        for (const r of failed) {
+            const key = r.failure?.kind === 'merge-conflict'
+                ? 'merge-conflict'
+                : r.failure?.kind === 'validation-failed'
+                    ? r.failure.category
+                    : 'unknown';
+            const label = r.failure?.kind === 'merge-conflict'
+                ? 'merge conflict'
+                : r.failure?.kind === 'validation-failed'
+                    ? r.failure.categoryLabel
+                    : 'unknown';
+            const bucket = grouped.get(key) ?? { label, results: [] };
+            bucket.results.push(r);
+            grouped.set(key, bucket);
+        }
+        const sections = ['## Failures'];
+        const ordered = [...grouped.entries()].sort((a, b) => b[1].results.length - a[1].results.length);
+        for (const [key, { label, results }] of ordered) {
+            sections.push(this.categorySection(key, label, results));
+        }
+        return sections.join('\n\n');
+    }
+    categorySection(key, label, results) {
+        const description = CATEGORY_DESCRIPTIONS[key];
+        const lines = [`### ${label} — ${results.length} PR(s)`];
+        if (description) {
+            lines.push('', `> ${description}`);
+        }
+        lines.push('');
+        for (const r of results) {
+            lines.push(this.failureEntry(r));
+        }
+        return lines.join('\n');
+    }
+    failureEntry(r) {
+        const head = `- [#${r.pr.number}](${r.pr.htmlUrl}) — ${r.pr.title}`;
+        if (r.failure?.kind === 'merge-conflict') {
+            const files = r.failure.files.map((f) => `    - \`${f}\``).join('\n');
+            return `${head}\n  Conflicting files:\n${files}`;
+        }
+        if (r.failure?.kind === 'validation-failed') {
+            return [
+                head,
+                `  - **Cause:** ${r.failure.cause}`,
+                `  - **Exit code:** ${r.failure.exitCode}`,
+                ``,
+                `  <details><summary>Validation output (tail)</summary>`,
+                ``,
+                // The cursor / static analyzer renders its own details block as part of
+                // the body; we strip the outer summary line and re-wrap inside the per-
+                // category block to keep nesting predictable.
+                r.failure.details,
+                ``,
+                `  </details>`,
+            ].join('\n');
+        }
+        return head;
     }
     finalSuiteSection(outcome) {
         if (!outcome)
@@ -31871,8 +32092,29 @@ class ReportBuilder {
         return [PASSED_PRS_BLOCK_START, numbers.join(','), PASSED_PRS_BLOCK_END].join('\n');
     }
 }
+function countFailureCategories(failed) {
+    const counts = new Map();
+    for (const r of failed) {
+        const key = r.failure?.kind === 'merge-conflict'
+            ? 'merge-conflict'
+            : r.failure?.kind === 'validation-failed'
+                ? r.failure.category
+                : 'unknown';
+        const label = r.failure?.kind === 'merge-conflict'
+            ? 'merge conflict'
+            : r.failure?.kind === 'validation-failed'
+                ? r.failure.categoryLabel
+                : 'unknown';
+        const existing = counts.get(key);
+        if (existing)
+            existing.count += 1;
+        else
+            counts.set(key, { label, count: 1 });
+    }
+    return counts;
+}
 function escapePipes(s) {
-    return s.replace(/\|/g, '\\|');
+    return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }
 
 ;// CONCATENATED MODULE: ./src/close-sources.ts
@@ -32315,6 +32557,7 @@ class BatchOrchestrator {
         }
         core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
         const explanation = await this.analyzer.explain({ pr, validation });
+        core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
         await this.merger.dropLastMerge(config.onFailure, pr);
         let pushed = false;
         if (config.onFailure === 'revert-commit') {
@@ -32327,6 +32570,10 @@ class BatchOrchestrator {
                 status: 'FAIL',
                 failure: {
                     kind: 'validation-failed',
+                    category: explanation.category,
+                    categoryLabel: explanation.categoryLabel,
+                    cause: explanation.cause,
+                    exitCode: explanation.exitCode,
                     summary: explanation.summary,
                     details: explanation.body,
                 },

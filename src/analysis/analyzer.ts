@@ -1,4 +1,5 @@
 import type { DependabotPR, FailureExplanation, ValidationOutcome } from '../types';
+import { categorizeFailure } from './categorize';
 
 export interface FailureAnalyzerInput {
   pr: DependabotPR;
@@ -11,14 +12,23 @@ export interface FailureAnalyzer {
 
 export class StaticFailureAnalyzer implements FailureAnalyzer {
   async explain({ pr, validation }: FailureAnalyzerInput): Promise<FailureExplanation> {
+    const { category, label, cause } = categorizeFailure(validation);
+    const tail = validation.stderrTail || validation.stdoutTail || '(no output captured)';
     return {
-      summary: `validation exited with code ${validation.exitCode}`,
+      category,
+      categoryLabel: label,
+      cause,
+      exitCode: validation.exitCode,
+      summary: cause,
       body:
-        `Validation command failed for PR #${pr.number} (${pr.title}).\n\n` +
-        `Exit code: ${validation.exitCode}\n\n` +
+        `**Category:** ${label}\n` +
+        `**Cause:** ${cause}\n` +
+        `**Exit code:** ${validation.exitCode}\n` +
+        `**PR:** #${pr.number} — ${pr.title}\n\n` +
+        '<details><summary>Validation output (tail)</summary>\n\n' +
         '```\n' +
-        (validation.stderrTail || validation.stdoutTail) +
-        '\n```',
+        tail +
+        '\n```\n\n</details>',
     };
   }
 }

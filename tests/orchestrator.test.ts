@@ -135,7 +135,14 @@ describe('BatchOrchestrator', () => {
         .mockResolvedValue({ passed: false, exitCode: 1, stdoutTail: 'boom', stderrTail: 'oops' }),
     };
     const analyzer: FailureAnalyzer = {
-      explain: vi.fn().mockResolvedValue({ summary: 'broke X', body: 'long story' }),
+      explain: vi.fn().mockResolvedValue({
+        category: 'unknown',
+        categoryLabel: 'unknown',
+        cause: 'broke X',
+        exitCode: 1,
+        summary: 'broke X',
+        body: 'long story',
+      }),
     };
     const prWriter = {
       findExistingPr: vi.fn().mockResolvedValue(null),

@@ -40,7 +40,15 @@ export type PRStatus = 'PASS' | 'FAIL';
 
 export type FailureReason =
   | { kind: 'merge-conflict'; files: string[] }
-  | { kind: 'validation-failed'; summary: string; details: string };
+  | {
+      kind: 'validation-failed';
+      category: import('./analysis/categorize').FailureCategory;
+      categoryLabel: string;
+      cause: string;
+      exitCode: number;
+      summary: string;
+      details: string;
+    };
 
 export interface PRResult {
   pr: DependabotPR;
@@ -61,6 +69,10 @@ export interface MergeOutcome {
 }
 
 export interface FailureExplanation {
+  category: import('./analysis/categorize').FailureCategory;
+  categoryLabel: string;
+  cause: string;
+  exitCode: number;
   summary: string;
   body: string;
 }

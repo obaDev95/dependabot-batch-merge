@@ -137,6 +137,7 @@ export class BatchOrchestrator {
 
     core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
     const explanation = await this.analyzer.explain({ pr, validation });
+    core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
     await this.merger.dropLastMerge(config.onFailure, pr);
     let pushed = false;
     if (config.onFailure === 'revert-commit') {
@@ -149,6 +150,10 @@ export class BatchOrchestrator {
         status: 'FAIL',
         failure: {
           kind: 'validation-failed',
+          category: explanation.category,
+          categoryLabel: explanation.categoryLabel,
+          cause: explanation.cause,
+          exitCode: explanation.exitCode,
           summary: explanation.summary,
           details: explanation.body,
         },

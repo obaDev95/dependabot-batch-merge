@@ -5,6 +5,7 @@ import {
   type FailureAnalyzer,
   type FailureAnalyzerInput,
 } from './analyzer';
+import { categorizeFailure } from './categorize';
 
 // NOTE: The exact Cursor Cloud / Background Agents API surface should be confirmed against
 // https://docs.cursor.com before relying on this in production. This implementation targets
@@ -30,10 +31,15 @@ export class CursorFailureAnalyzer implements FailureAnalyzer {
   }
 
   async explain(input: FailureAnalyzerInput): Promise<FailureExplanation> {
+    const { category, label, cause } = categorizeFailure(input.validation);
     try {
       const text = await this.callCursor(this.buildPrompt(input));
       return {
-        summary: firstLine(text) || `validation exited with code ${input.validation.exitCode}`,
+        category,
+        categoryLabel: label,
+        cause,
+        exitCode: input.validation.exitCode,
+        summary: firstLine(text) || cause,
         body: text,
       };
     } catch (err) {
