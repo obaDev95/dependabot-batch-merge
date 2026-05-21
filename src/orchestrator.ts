@@ -130,9 +130,31 @@ export class BatchOrchestrator {
 
     const validation = await this.validator.run();
     if (validation.passed) {
-      await this.branchManager.push(integrationBranch);
-      core.info(`PR #${pr.number} PASS`);
-      return { result: { pr, status: 'PASS' }, pushed: true };
+      const pushOutcome = await this.branchManager.push(integrationBranch);
+      if (pushOutcome.kind === 'pushed') {
+        core.info(`PR #${pr.number} PASS`);
+        return { result: { pr, status: 'PASS' }, pushed: true };
+      }
+      // Push refused (workflow scope / branch protection / other). Roll the
+      // merge back so subsequent PRs see a clean integration branch tip,
+      // then record the rejection and let the loop continue. A previous
+      // version threw here and killed the whole run on the first refusal.
+      core.warning(
+        `PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`,
+      );
+      await this.merger.dropLastMerge('skip', pr);
+      return {
+        result: {
+          pr,
+          status: 'FAIL',
+          failure: {
+            kind: 'push-rejected',
+            reason: pushOutcome.reason,
+            message: pushOutcome.message,
+          },
+        },
+        pushed: false,
+      };
     }
 
     core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
@@ -141,8 +163,14 @@ export class BatchOrchestrator {
     await this.merger.dropLastMerge(config.onFailure, pr);
     let pushed = false;
     if (config.onFailure === 'revert-commit') {
-      await this.branchManager.push(integrationBranch);
-      pushed = true;
+      const revertPush = await this.branchManager.push(integrationBranch);
+      if (revertPush.kind === 'pushed') {
+        pushed = true;
+      } else {
+        core.warning(
+          `PR #${pr.number} revert push rejected (${revertPush.reason}): ${revertPush.message}`,
+        );
+      }
     }
     return {
       result: {

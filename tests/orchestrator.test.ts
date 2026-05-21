@@ -41,7 +41,7 @@ describe('BatchOrchestrator', () => {
     const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } satisfies Partial<DependabotPRLister> as DependabotPRLister;
     const branchManager = {
       createIntegrationBranch: vi.fn().mockResolvedValue('chore/dependabot-batch-2026-05-14'),
-      push: vi.fn().mockResolvedValue(undefined),
+      push: vi.fn().mockResolvedValue({ kind: 'pushed' }),
       fetchPr: vi.fn().mockResolvedValue(undefined),
     } satisfies Partial<BranchManager> as BranchManager;
     const merger = {

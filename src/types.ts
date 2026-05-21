@@ -38,6 +38,8 @@ export interface DependabotPR {
 
 export type PRStatus = 'PASS' | 'FAIL';
 
+export type PushRejectReason = 'workflow-scope-required' | 'branch-protection' | 'other';
+
 export type FailureReason =
   | { kind: 'merge-conflict'; files: string[] }
   | {
@@ -48,6 +50,11 @@ export type FailureReason =
       exitCode: number;
       summary: string;
       details: string;
+    }
+  | {
+      kind: 'push-rejected';
+      reason: PushRejectReason;
+      message: string;
     };
 
 export interface PRResult {

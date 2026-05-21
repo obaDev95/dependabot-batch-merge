@@ -97,17 +97,21 @@ const RULES: Rule[] = [
   },
   {
     category: 'test-failure',
-    test: /\bTests?\s*:?\s*\d+\s*failed|^FAIL\s|\b\d+\s+failing\b|AssertionError\b/im,
+    test: /\bTests?\s*:?\s*\d+\s*failed|\bFAIL\s+\S+\.(?:spec|test)\.(?:ts|tsx|js|jsx|vue)\b|\bSnapshots?\s*:?\s*\d+\s*failed|Snapshot\s+`[^`]+`\s+(?:mismatched|did not match)|\b\d+\s+failing\b|AssertionError\b/i,
     refine: (text) => {
-      const vitest = text.match(/Tests?\s*:?\s*(\d+)\s*failed[^,\n]*(?:,\s*(\d+)\s*passed)?/i);
-      if (vitest) {
-        const failed = vitest[1];
-        const passed = vitest[2];
+      const snapshot = text.match(/Snapshot\s+`([^`]+)`\s+(?:mismatched|did not match)/i);
+      if (snapshot) return `snapshot "${snapshot[1]}" mismatched`;
+      const vitestTests = text.match(/Tests?\s*:?\s*(\d+)\s*failed[^,\n]*(?:,\s*(\d+)\s*passed)?/i);
+      if (vitestTests) {
+        const failed = vitestTests[1];
+        const passed = vitestTests[2];
         return passed
           ? `${failed} test(s) failed (${passed} passed)`
           : `${failed} test(s) failed`;
       }
-      const file = text.match(/^FAIL\s+(\S+)/m);
+      const vitestSnaps = text.match(/Snapshots?\s*:?\s*(\d+)\s*failed/i);
+      if (vitestSnaps) return `${vitestSnaps[1]} snapshot(s) failed`;
+      const file = text.match(/\bFAIL\s+(\S+\.(?:spec|test)\.(?:ts|tsx|js|jsx|vue))/);
       return file ? `test file failed: ${file[1]}` : 'one or more tests failed';
     },
   },
@@ -133,7 +137,12 @@ const RULES: Rule[] = [
 ];
 
 export function categorizeFailure(validation: ValidationOutcome): CategorizedFailure {
-  const text = `${validation.stderrTail || ''}\n${validation.stdoutTail || ''}`;
+  // ANSI escapes from coloured tooling output (vitest, npm) defeat ^/$
+  // anchors and \b boundaries — strip them before matching. Without this,
+  // vitest's `FAIL <path>` line is preceded by SGR codes on the same line
+  // and the regex misses every snapshot/test failure.
+  const raw = `${validation.stderrTail || ''}\n${validation.stdoutTail || ''}`;
+  const text = stripAnsi(raw);
   for (const rule of RULES) {
     if (rule.test.test(text)) {
       const cause = rule.refine?.(text) ?? LABELS[rule.category];
@@ -145,6 +154,14 @@ export function categorizeFailure(validation: ValidationOutcome): CategorizedFai
     label: LABELS.unknown,
     cause: `validation exited with code ${validation.exitCode}`,
   };
+}
+
+// Matches CSI (Control Sequence Introducer) and OSC sequences. Sufficient
+// for vitest/npm/git tooling output; not a general-purpose ANSI parser.
+const ANSI_PATTERN = /\[[0-9;?]*[A-Za-z]|\][^]*(?:|\\)/g;
+
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_PATTERN, '');
 }
 
 function truncate(s: string, max: number): string {

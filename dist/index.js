@@ -31760,17 +31760,23 @@ const RULES = [
     },
     {
         category: 'test-failure',
-        test: /\bTests?\s*:?\s*\d+\s*failed|^FAIL\s|\b\d+\s+failing\b|AssertionError\b/im,
+        test: /\bTests?\s*:?\s*\d+\s*failed|\bFAIL\s+\S+\.(?:spec|test)\.(?:ts|tsx|js|jsx|vue)\b|\bSnapshots?\s*:?\s*\d+\s*failed|Snapshot\s+`[^`]+`\s+(?:mismatched|did not match)|\b\d+\s+failing\b|AssertionError\b/i,
         refine: (text) => {
-            const vitest = text.match(/Tests?\s*:?\s*(\d+)\s*failed[^,\n]*(?:,\s*(\d+)\s*passed)?/i);
-            if (vitest) {
-                const failed = vitest[1];
-                const passed = vitest[2];
+            const snapshot = text.match(/Snapshot\s+`([^`]+)`\s+(?:mismatched|did not match)/i);
+            if (snapshot)
+                return `snapshot "${snapshot[1]}" mismatched`;
+            const vitestTests = text.match(/Tests?\s*:?\s*(\d+)\s*failed[^,\n]*(?:,\s*(\d+)\s*passed)?/i);
+            if (vitestTests) {
+                const failed = vitestTests[1];
+                const passed = vitestTests[2];
                 return passed
                     ? `${failed} test(s) failed (${passed} passed)`
                     : `${failed} test(s) failed`;
             }
-            const file = text.match(/^FAIL\s+(\S+)/m);
+            const vitestSnaps = text.match(/Snapshots?\s*:?\s*(\d+)\s*failed/i);
+            if (vitestSnaps)
+                return `${vitestSnaps[1]} snapshot(s) failed`;
+            const file = text.match(/\bFAIL\s+(\S+\.(?:spec|test)\.(?:ts|tsx|js|jsx|vue))/);
             return file ? `test file failed: ${file[1]}` : 'one or more tests failed';
         },
     },
@@ -31798,7 +31804,12 @@ const RULES = [
     },
 ];
 function categorizeFailure(validation) {
-    const text = `${validation.stderrTail || ''}\n${validation.stdoutTail || ''}`;
+    // ANSI escapes from coloured tooling output (vitest, npm) defeat ^/$
+    // anchors and \b boundaries — strip them before matching. Without this,
+    // vitest's `FAIL <path>` line is preceded by SGR codes on the same line
+    // and the regex misses every snapshot/test failure.
+    const raw = `${validation.stderrTail || ''}\n${validation.stdoutTail || ''}`;
+    const text = stripAnsi(raw);
     for (const rule of RULES) {
         if (rule.test.test(text)) {
             const cause = rule.refine?.(text) ?? LABELS[rule.category];
@@ -31810,6 +31821,12 @@ function categorizeFailure(validation) {
         label: LABELS.unknown,
         cause: `validation exited with code ${validation.exitCode}`,
     };
+}
+// Matches CSI (Control Sequence Introducer) and OSC sequences. Sufficient
+// for vitest/npm/git tooling output; not a general-purpose ANSI parser.
+const ANSI_PATTERN = /\[[0-9;?]*[A-Za-z]|\][^]*(?:|\\)/g;
+function stripAnsi(text) {
+    return text.replace(ANSI_PATTERN, '');
 }
 function truncate(s, max) {
     return s.length > max ? `${s.slice(0, max - 1)}…` : s;
@@ -31942,6 +31959,9 @@ const CATEGORY_DESCRIPTIONS = {
     'build-error': 'Production build (`vite build` / rollup) failed after the merge.',
     unknown: 'No known failure pattern matched the validation output. Inspect the tail manually.',
     'merge-conflict': 'The Dependabot branch conflicts with another change already on the integration branch (often another Dependabot PR that touched the same lockfile).',
+    'push-workflow-scope': 'GitHub refused the push because the PR modifies `.github/workflows/*` and the PAT lacks the `workflow` scope (classic) or `Actions: Write` permission (fine-grained). Either re-scope the PAT or merge these PRs manually outside the batch.',
+    'push-branch-protection': 'The integration branch is protected. Loosen the rule for the action\'s identity (e.g. an exemption or `Allow specified actors to bypass`) or change the integration branch naming pattern.',
+    'push-other': 'The push was rejected for a reason that doesn\'t match the known patterns. Inspect the message for the underlying git/GitHub error.',
 };
 class ReportBuilder {
     build(params) {
@@ -32008,6 +32028,10 @@ class ReportBuilder {
                 category = r.failure.categoryLabel;
                 note = `exit ${r.failure.exitCode}: ${r.failure.cause}`;
             }
+            else if (r.failure?.kind === 'push-rejected') {
+                category = pushRejectLabel(r.failure.reason);
+                note = r.failure.message;
+            }
             return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(category)} | ${escapePipes(note)} |`;
         });
         return [header, ...rows].join('\n');
@@ -32019,16 +32043,7 @@ class ReportBuilder {
         // section instead of scrolling through 37 nearly-identical traces.
         const grouped = new Map();
         for (const r of failed) {
-            const key = r.failure?.kind === 'merge-conflict'
-                ? 'merge-conflict'
-                : r.failure?.kind === 'validation-failed'
-                    ? r.failure.category
-                    : 'unknown';
-            const label = r.failure?.kind === 'merge-conflict'
-                ? 'merge conflict'
-                : r.failure?.kind === 'validation-failed'
-                    ? r.failure.categoryLabel
-                    : 'unknown';
+            const { key, label } = classifyResult(r);
             const bucket = grouped.get(key) ?? { label, results: [] };
             bucket.results.push(r);
             grouped.set(key, bucket);
@@ -32074,6 +32089,9 @@ class ReportBuilder {
                 `  </details>`,
             ].join('\n');
         }
+        if (r.failure?.kind === 'push-rejected') {
+            return `${head}\n  - **Push rejected:** ${r.failure.message}`;
+        }
         return head;
     }
     finalSuiteSection(outcome) {
@@ -32095,16 +32113,7 @@ class ReportBuilder {
 function countFailureCategories(failed) {
     const counts = new Map();
     for (const r of failed) {
-        const key = r.failure?.kind === 'merge-conflict'
-            ? 'merge-conflict'
-            : r.failure?.kind === 'validation-failed'
-                ? r.failure.category
-                : 'unknown';
-        const label = r.failure?.kind === 'merge-conflict'
-            ? 'merge conflict'
-            : r.failure?.kind === 'validation-failed'
-                ? r.failure.categoryLabel
-                : 'unknown';
+        const { key, label } = classifyResult(r);
         const existing = counts.get(key);
         if (existing)
             existing.count += 1;
@@ -32112,6 +32121,38 @@ function countFailureCategories(failed) {
             counts.set(key, { label, count: 1 });
     }
     return counts;
+}
+function classifyResult(r) {
+    if (r.failure?.kind === 'merge-conflict') {
+        return { key: 'merge-conflict', label: 'merge conflict' };
+    }
+    if (r.failure?.kind === 'validation-failed') {
+        return { key: r.failure.category, label: r.failure.categoryLabel };
+    }
+    if (r.failure?.kind === 'push-rejected') {
+        return { key: `push-${pushKeyForReason(r.failure.reason)}`, label: pushRejectLabel(r.failure.reason) };
+    }
+    return { key: 'unknown', label: 'unknown' };
+}
+function pushKeyForReason(reason) {
+    switch (reason) {
+        case 'workflow-scope-required':
+            return 'workflow-scope';
+        case 'branch-protection':
+            return 'branch-protection';
+        default:
+            return 'other';
+    }
+}
+function pushRejectLabel(reason) {
+    switch (reason) {
+        case 'workflow-scope-required':
+            return 'push rejected (workflow scope)';
+        case 'branch-protection':
+            return 'push rejected (branch protection)';
+        default:
+            return 'push rejected';
+    }
 }
 function escapePipes(s) {
     return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
@@ -32276,8 +32317,35 @@ class BranchManager {
         await this.git.run(['push', '-u', '--force', 'origin', branch]);
         return branch;
     }
+    // Non-throwing on remote rejection so the orchestrator can record the
+    // outcome and continue with the next PR. A previous version let the
+    // exception bubble, which killed the whole run on the first workflow-
+    // touching Dependabot PR (PAT lacks 'workflow' scope) — leaving the
+    // remaining backlog unprocessed.
     async push(branch) {
-        await this.git.run(['push', 'origin', branch]);
+        const result = await this.git.run(['push', 'origin', branch], { ignoreReturnCode: true });
+        if (result.exitCode === 0)
+            return { kind: 'pushed' };
+        const combined = `${result.stderr}\n${result.stdout}`;
+        if (/refusing to allow a (?:Personal Access Token|GitHub App) to (?:create or update workflow|workflow)/i.test(combined)) {
+            return {
+                kind: 'rejected',
+                reason: 'workflow-scope-required',
+                message: "GitHub refused the push because the PR modifies .github/workflows/* and the PAT lacks the 'workflow' scope (classic) or 'Actions: Write' permission (fine-grained).",
+            };
+        }
+        if (/protected branch|branch protection|GH006/i.test(combined)) {
+            return {
+                kind: 'rejected',
+                reason: 'branch-protection',
+                message: 'GitHub refused the push due to branch protection rules on the integration branch.',
+            };
+        }
+        return {
+            kind: 'rejected',
+            reason: 'other',
+            message: combined.trim() || `git push exited with code ${result.exitCode}`,
+        };
     }
     async fetchPr(headRef) {
         await this.git.run(['fetch', 'origin', headRef]);
@@ -32551,9 +32619,29 @@ class BatchOrchestrator {
         }
         const validation = await this.validator.run();
         if (validation.passed) {
-            await this.branchManager.push(integrationBranch);
-            core.info(`PR #${pr.number} PASS`);
-            return { result: { pr, status: 'PASS' }, pushed: true };
+            const pushOutcome = await this.branchManager.push(integrationBranch);
+            if (pushOutcome.kind === 'pushed') {
+                core.info(`PR #${pr.number} PASS`);
+                return { result: { pr, status: 'PASS' }, pushed: true };
+            }
+            // Push refused (workflow scope / branch protection / other). Roll the
+            // merge back so subsequent PRs see a clean integration branch tip,
+            // then record the rejection and let the loop continue. A previous
+            // version threw here and killed the whole run on the first refusal.
+            core.warning(`PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`);
+            await this.merger.dropLastMerge('skip', pr);
+            return {
+                result: {
+                    pr,
+                    status: 'FAIL',
+                    failure: {
+                        kind: 'push-rejected',
+                        reason: pushOutcome.reason,
+                        message: pushOutcome.message,
+                    },
+                },
+                pushed: false,
+            };
         }
         core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
         const explanation = await this.analyzer.explain({ pr, validation });
@@ -32561,8 +32649,13 @@ class BatchOrchestrator {
         await this.merger.dropLastMerge(config.onFailure, pr);
         let pushed = false;
         if (config.onFailure === 'revert-commit') {
-            await this.branchManager.push(integrationBranch);
-            pushed = true;
+            const revertPush = await this.branchManager.push(integrationBranch);
+            if (revertPush.kind === 'pushed') {
+                pushed = true;
+            }
+            else {
+                core.warning(`PR #${pr.number} revert push rejected (${revertPush.reason}): ${revertPush.message}`);
+            }
         }
         return {
             result: {
