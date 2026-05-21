@@ -44,6 +44,11 @@ on:
         required: false
         type: boolean
         default: false
+      max-prs:
+        description: 'Safety cap on Dependabot PRs processed in one run. Increase if the backlog has grown beyond the default; the action otherwise picks the oldest N PRs and silently skips the rest.'
+        required: false
+        type: number
+        default: 50
 
 jobs:
   run:
@@ -125,5 +130,6 @@ jobs:
           mode: ${{ inputs.mode }}
           validation-command: ${{ inputs.validation-command }}
           close-source-prs: ${{ inputs.close-source-prs && 'true' || 'false' }}
+          max-prs: ${{ inputs.max-prs }}
           cursor-api-key: ${{ secrets.CURSOR_API_KEY }}
           github-token: ${{ secrets.TARGET_REPO_PAT }}
