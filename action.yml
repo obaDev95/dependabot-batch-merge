@@ -9,13 +9,9 @@ inputs:
   target-repo:
     description: 'owner/repo of the repository to operate on. v1 is hard-locked to "Maersk-Global/ui-myfinance"; any other value fails fast in config parsing. Onboarding additional repos requires a code change.'
     required: true
-  mode:
-    description: 'Operation mode: "batch" (merge PRs and open batch PR) or "close-sources" (close PASSed source PRs after batch PR merged).'
-    required: false
-    default: 'batch'
   validation-command:
-    description: 'Shell command run after each merge to validate the integration branch (e.g. "npm ci && npm test"). Required when mode=batch.'
-    required: false
+    description: 'Shell command run after each merge to validate the integration branch (e.g. "npm ci && npm test").'
+    required: true
   base-branch:
     description: 'Branch the integration branch is cut from and the batch PR targets.'
     required: false
@@ -44,6 +40,10 @@ inputs:
     description: 'Maximum number of Dependabot PRs to process in one run (safety cap).'
     required: false
     default: '20'
+  close-source-prs:
+    description: 'If true, close each PASSed source Dependabot PR with a "Bundled into batch PR #X" comment at the end of the run.'
+    required: false
+    default: 'false'
   cursor-api-key:
     description: 'Cursor Cloud API key, used to generate failure explanations.'
     required: false

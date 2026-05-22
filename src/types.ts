@@ -1,9 +1,6 @@
-export type Mode = 'batch' | 'close-sources';
-
 export type FailureHandling = 'skip' | 'revert-commit';
 
 export interface BatchConfig {
-  mode: 'batch';
   baseBranch: string;
   integrationBranchPrefix: string;
   dependabotAuthor: string;
@@ -12,19 +9,10 @@ export interface BatchConfig {
   reRunFinalSuite: boolean;
   draftPr: boolean;
   maxPrs: number;
+  closeSourcePrs: boolean;
   owner: string;
   repo: string;
 }
-
-export interface CloseSourcesConfig {
-  mode: 'close-sources';
-  baseBranch: string;
-  integrationBranchPrefix: string;
-  owner: string;
-  repo: string;
-}
-
-export type RunConfig = BatchConfig | CloseSourcesConfig;
 
 export interface DependabotPR {
   number: number;

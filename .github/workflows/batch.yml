@@ -31,19 +31,16 @@ on:
         required: true
         type: string
         default: 'npm ci && npm run typecheck && npm test && npm run build'
-      mode:
-        description: 'Operation mode.'
-        required: false
-        type: choice
-        options:
-          - batch
-          - close-sources
-        default: batch
       max-prs:
         description: 'Safety cap on Dependabot PRs processed in one run. Increase if the backlog has grown beyond the default; the action otherwise picks the oldest N PRs and silently skips the rest.'
         required: false
         type: number
         default: 50
+      close-source-prs:
+        description: 'Close each successfully merged source Dependabot PR with a "Bundled into batch PR #X" comment after the batch PR is opened/updated.'
+        required: false
+        type: boolean
+        default: false
 
 jobs:
   run:
@@ -122,8 +119,8 @@ jobs:
         uses: obaDev95/dependabot-batch-merge@main
         with:
           target-repo: ${{ inputs.target-repo }}
-          mode: ${{ inputs.mode }}
           validation-command: ${{ inputs.validation-command }}
           max-prs: ${{ inputs.max-prs }}
+          close-source-prs: ${{ inputs.close-source-prs && 'true' || 'false' }}
           cursor-api-key: ${{ secrets.CURSOR_API_KEY }}
           github-token: ${{ secrets.TARGET_REPO_PAT }}

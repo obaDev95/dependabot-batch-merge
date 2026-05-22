@@ -1,7 +1,6 @@
 import * as core from '@actions/core';
 import { StaticFailureAnalyzer, type FailureAnalyzer } from './analysis/analyzer';
 import { CursorFailureAnalyzer } from './analysis/cursor-analyzer';
-import { CloseSourcesOrchestrator } from './close-sources';
 import { parseConfig } from './config';
 import { BranchManager } from './git/branch-manager';
 import { GitRunner } from './git/git-runner';
@@ -9,6 +8,7 @@ import { PRMerger } from './git/merger';
 import { GitHubClient } from './github/client';
 import { DependabotPRLister } from './github/pr-lister';
 import { BatchPRWriter } from './github/pr-writer';
+import { SourcePRCloser } from './github/source-pr-closer';
 import { BatchOrchestrator } from './orchestrator';
 import { ReportBuilder } from './report/builder';
 import type { BatchConfig, BatchSummary } from './types';
@@ -22,20 +22,11 @@ async function main(): Promise<void> {
   const token = core.getInput('github-token', { required: true });
   const gh = new GitHubClient(token, config.owner, config.repo);
 
-  if (config.mode === 'batch') {
-    const summary = await runBatch(config, gh);
-    core.setOutput('batch-pr-number', summary.batchPrNumber ?? '');
-    core.setOutput('batch-pr-url', summary.batchPrUrl ?? '');
-    core.setOutput('pass-count', summary.results.filter((r) => r.status === 'PASS').length);
-    core.setOutput('fail-count', summary.results.filter((r) => r.status === 'FAIL').length);
-    return;
-  }
-
-  const closer = new CloseSourcesOrchestrator(gh);
-  const summary = await closer.run(config);
-  core.info(
-    `Closed ${summary.closedPrNumbers.length} PR(s); skipped ${summary.skippedPrNumbers.length}`,
-  );
+  const summary = await runBatch(config, gh);
+  core.setOutput('batch-pr-number', summary.batchPrNumber ?? '');
+  core.setOutput('batch-pr-url', summary.batchPrUrl ?? '');
+  core.setOutput('pass-count', summary.results.filter((r) => r.status === 'PASS').length);
+  core.setOutput('fail-count', summary.results.filter((r) => r.status === 'FAIL').length);
 }
 
 async function runBatch(config: BatchConfig, gh: GitHubClient): Promise<BatchSummary> {
@@ -49,6 +40,7 @@ async function runBatch(config: BatchConfig, gh: GitHubClient): Promise<BatchSum
   const reporter = new ReportBuilder();
   const prLister = new DependabotPRLister(gh);
   const prWriter = new BatchPRWriter(gh);
+  const sourcePrCloser = new SourcePRCloser(gh);
 
   const orchestrator = new BatchOrchestrator(
     prLister,
@@ -58,6 +50,7 @@ async function runBatch(config: BatchConfig, gh: GitHubClient): Promise<BatchSum
     analyzer,
     reporter,
     prWriter,
+    sourcePrCloser,
   );
 
   return orchestrator.run(config);

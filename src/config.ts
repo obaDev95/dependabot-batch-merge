@@ -1,47 +1,34 @@
 import * as core from '@actions/core';
-import type { BatchConfig, CloseSourcesConfig, FailureHandling, Mode, RunConfig } from './types';
+import type { BatchConfig, FailureHandling } from './types';
 
 export class ConfigError extends Error {}
 
 const V1_ALLOWED_TARGET_REPO = 'Maersk-Global/ui-myfinance';
 
-export function parseConfig(): RunConfig {
-  const mode = parseMode(core.getInput('mode') || 'batch');
+export function parseConfig(): BatchConfig {
   const { owner, repo } = resolveTargetRepo();
   const baseBranch = core.getInput('base-branch') || 'main';
   const integrationBranchPrefix =
     core.getInput('integration-branch-prefix') || 'chore/dependabot-batch';
 
-  if (mode === 'batch') {
-    const validationCommand = core.getInput('validation-command');
-    if (!validationCommand) {
-      throw new ConfigError('validation-command is required when mode=batch');
-    }
-
-    const config: BatchConfig = {
-      mode,
-      owner,
-      repo,
-      baseBranch,
-      integrationBranchPrefix,
-      dependabotAuthor: core.getInput('dependabot-author') || 'dependabot[bot]',
-      validationCommand,
-      onFailure: parseFailureHandling(core.getInput('on-failure') || 'skip'),
-      reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
-      draftPr: parseBool(core.getInput('draft-pr'), true),
-      maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
-    };
-    return config;
+  const validationCommand = core.getInput('validation-command');
+  if (!validationCommand) {
+    throw new ConfigError('validation-command is required');
   }
 
-  const config: CloseSourcesConfig = {
-    mode,
+  return {
     owner,
     repo,
     baseBranch,
     integrationBranchPrefix,
+    dependabotAuthor: core.getInput('dependabot-author') || 'dependabot[bot]',
+    validationCommand,
+    onFailure: parseFailureHandling(core.getInput('on-failure') || 'skip'),
+    reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
+    draftPr: parseBool(core.getInput('draft-pr'), true),
+    maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
+    closeSourcePrs: parseBool(core.getInput('close-source-prs'), false),
   };
-  return config;
 }
 
 // v1 is hard-locked to a single target repository. Onboarding other teams is
@@ -57,11 +44,6 @@ function resolveTargetRepo(): { owner: string; repo: string } {
   }
   const [owner, repo] = V1_ALLOWED_TARGET_REPO.split('/') as [string, string];
   return { owner, repo };
-}
-
-function parseMode(raw: string): Mode {
-  if (raw === 'batch' || raw === 'close-sources') return raw;
-  throw new ConfigError(`mode must be "batch" or "close-sources", got "${raw}"`);
 }
 
 function parseFailureHandling(raw: string): FailureHandling {

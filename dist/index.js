@@ -31941,320 +31941,32 @@ function firstLine(text) {
     return idx === -1 ? text.trim() : text.slice(0, idx).trim();
 }
 
-;// CONCATENATED MODULE: ./src/report/builder.ts
-const PASSED_PRS_BLOCK_START = '<!-- dependabot-batch-merge:passed-prs:start -->';
-const PASSED_PRS_BLOCK_END = '<!-- dependabot-batch-merge:passed-prs:end -->';
-// Documentation rendered alongside each failure category so reviewers don't
-// have to reverse-engineer what "npm 401" or "lockfile drift" means in this
-// repository's context.
-const CATEGORY_DESCRIPTIONS = {
-    'npm-auth-401': 'The runner has no credentials for `npm.pkg.github.com`. Check the workflow\'s GitHub Packages auth setup (`NODE_AUTH_TOKEN` env + `NPM_CONFIG_USERCONFIG`).',
-    'npm-forbidden-403': '`TARGET_REPO_PAT` (or whichever PAT feeds `NODE_AUTH_TOKEN`) lacks `Packages: Read` on the package\'s publisher repo, or the PAT is not SSO-authorized for the org.',
-    'lockfile-drift': '`npm ci` refuses to install because `package.json` and `package-lock.json` disagree. Regenerate the lockfile against the Dependabot bump and re-run.',
-    'peer-dep-conflict': 'npm cannot resolve a peer dependency requirement. Either pin a compatible version or accept the Dependabot upgrade alongside its peer.',
-    'missing-module': 'An import points at a module that isn\'t resolvable from the installed dependency tree. Likely a stale import after a package rename or a removed export.',
-    'type-error': 'TypeScript compilation failed. Usually a breaking API change in the bumped package — update the call site.',
-    'test-failure': 'Unit/component tests failed after the merge. The bump may have changed runtime behavior; inspect the failing spec.',
-    'install-error': 'An npm install step failed for a reason that doesn\'t match the more specific categories above. Read the tail for the exact error code.',
-    'build-error': 'Production build (`vite build` / rollup) failed after the merge.',
-    unknown: 'No known failure pattern matched the validation output. Inspect the tail manually.',
-    'merge-conflict': 'The Dependabot branch conflicts with another change already on the integration branch (often another Dependabot PR that touched the same lockfile).',
-    'push-workflow-scope': 'GitHub refused the push because the PR modifies `.github/workflows/*` and the PAT lacks the `workflow` scope (classic) or `Actions: Write` permission (fine-grained). Either re-scope the PAT or merge these PRs manually outside the batch.',
-    'push-branch-protection': 'The integration branch is protected. Loosen the rule for the action\'s identity (e.g. an exemption or `Allow specified actors to bypass`) or change the integration branch naming pattern.',
-    'push-other': 'The push was rejected for a reason that doesn\'t match the known patterns. Inspect the message for the underlying git/GitHub error.',
-};
-class ReportBuilder {
-    build(params) {
-        const passed = params.results.filter((r) => r.status === 'PASS');
-        const failed = params.results.filter((r) => r.status === 'FAIL');
-        const categoryCounts = countFailureCategories(failed);
-        return [
-            `## Dependabot batch merge`,
-            ``,
-            `Integration branch: \`${params.integrationBranch}\` → \`${params.baseBranch}\``,
-            `Processed: **${params.results.length}** · PASS: **${passed.length}** · FAIL: **${failed.length}**`,
-            ``,
-            this.categoryOverview(categoryCounts, failed.length),
-            ``,
-            this.summaryTable(params.results),
-            ``,
-            this.failureSection(failed),
-            ``,
-            this.finalSuiteSection(params.finalSuite),
-            ``,
-            this.passedPrsBlock(passed.map((r) => r.pr.number)),
-        ]
-            .filter((section) => section.length > 0)
-            .join('\n');
-    }
-    static parsePassedPrNumbers(body) {
-        const start = body.indexOf(PASSED_PRS_BLOCK_START);
-        const end = body.indexOf(PASSED_PRS_BLOCK_END);
-        if (start === -1 || end === -1 || end < start)
-            return [];
-        const block = body.slice(start + PASSED_PRS_BLOCK_START.length, end);
-        return block
-            .split(/[,\s]+/)
-            .map((token) => Number.parseInt(token, 10))
-            .filter((n) => Number.isInteger(n) && n > 0);
-    }
-    categoryOverview(counts, totalFailed) {
-        if (totalFailed === 0)
-            return '';
-        const lines = ['### Failure breakdown', '', '| Category | Count | What it means |', '| --- | ---: | --- |'];
-        const entries = [...counts.entries()].sort((a, b) => b[1].count - a[1].count);
-        for (const [key, { label, count }] of entries) {
-            const description = CATEGORY_DESCRIPTIONS[key] ?? '';
-            lines.push(`| ${escapePipes(label)} | ${count} | ${escapePipes(description)} |`);
-        }
-        return lines.join('\n');
-    }
-    summaryTable(results) {
-        if (results.length === 0)
-            return '_No Dependabot PRs were processed._';
-        const header = '| PR | Title | Result | Category | Notes |\n| --- | --- | --- | --- | --- |';
-        const rows = results.map((r) => {
-            const icon = r.status === 'PASS' ? '✅' : '❌';
-            let category = '';
-            let note = '';
-            if (r.status === 'PASS') {
-                category = '—';
-            }
-            else if (r.failure?.kind === 'merge-conflict') {
-                category = 'merge conflict';
-                note = `${r.failure.files.length} file(s) conflicted`;
-            }
-            else if (r.failure?.kind === 'validation-failed') {
-                category = r.failure.categoryLabel;
-                note = `exit ${r.failure.exitCode}: ${r.failure.cause}`;
-            }
-            else if (r.failure?.kind === 'push-rejected') {
-                category = pushRejectLabel(r.failure.reason);
-                note = r.failure.message;
-            }
-            return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(category)} | ${escapePipes(note)} |`;
-        });
-        return [header, ...rows].join('\n');
-    }
-    failureSection(failed) {
-        if (failed.length === 0)
-            return '';
-        // Group by category so reviewers see "37 PRs failed on npm 401" as one
-        // section instead of scrolling through 37 nearly-identical traces.
-        const grouped = new Map();
-        for (const r of failed) {
-            const { key, label } = classifyResult(r);
-            const bucket = grouped.get(key) ?? { label, results: [] };
-            bucket.results.push(r);
-            grouped.set(key, bucket);
-        }
-        const sections = ['## Failures'];
-        const ordered = [...grouped.entries()].sort((a, b) => b[1].results.length - a[1].results.length);
-        for (const [key, { label, results }] of ordered) {
-            sections.push(this.categorySection(key, label, results));
-        }
-        return sections.join('\n\n');
-    }
-    categorySection(key, label, results) {
-        const description = CATEGORY_DESCRIPTIONS[key];
-        const lines = [`### ${label} — ${results.length} PR(s)`];
-        if (description) {
-            lines.push('', `> ${description}`);
-        }
-        lines.push('');
-        for (const r of results) {
-            lines.push(this.failureEntry(r));
-        }
-        return lines.join('\n');
-    }
-    failureEntry(r) {
-        const head = `- [#${r.pr.number}](${r.pr.htmlUrl}) — ${r.pr.title}`;
-        if (r.failure?.kind === 'merge-conflict') {
-            const files = r.failure.files.map((f) => `    - \`${f}\``).join('\n');
-            return `${head}\n  Conflicting files:\n${files}`;
-        }
-        if (r.failure?.kind === 'validation-failed') {
-            return [
-                head,
-                `  - **Cause:** ${r.failure.cause}`,
-                `  - **Exit code:** ${r.failure.exitCode}`,
-                ``,
-                `  <details><summary>Validation output (tail)</summary>`,
-                ``,
-                // The cursor / static analyzer renders its own details block as part of
-                // the body; we strip the outer summary line and re-wrap inside the per-
-                // category block to keep nesting predictable.
-                r.failure.details,
-                ``,
-                `  </details>`,
-            ].join('\n');
-        }
-        if (r.failure?.kind === 'push-rejected') {
-            return `${head}\n  - **Push rejected:** ${r.failure.message}`;
-        }
-        return head;
-    }
-    finalSuiteSection(outcome) {
-        if (!outcome)
-            return '';
-        const icon = outcome.passed ? '✅' : '❌';
-        return [
-            `## Final suite re-run`,
-            `${icon} exit code ${outcome.exitCode}`,
-            ...(outcome.passed
-                ? []
-                : ['', '```', outcome.stderrTail || outcome.stdoutTail, '```']),
-        ].join('\n');
-    }
-    passedPrsBlock(numbers) {
-        return [PASSED_PRS_BLOCK_START, numbers.join(','), PASSED_PRS_BLOCK_END].join('\n');
-    }
-}
-function countFailureCategories(failed) {
-    const counts = new Map();
-    for (const r of failed) {
-        const { key, label } = classifyResult(r);
-        const existing = counts.get(key);
-        if (existing)
-            existing.count += 1;
-        else
-            counts.set(key, { label, count: 1 });
-    }
-    return counts;
-}
-function classifyResult(r) {
-    if (r.failure?.kind === 'merge-conflict') {
-        return { key: 'merge-conflict', label: 'merge conflict' };
-    }
-    if (r.failure?.kind === 'validation-failed') {
-        return { key: r.failure.category, label: r.failure.categoryLabel };
-    }
-    if (r.failure?.kind === 'push-rejected') {
-        return { key: `push-${pushKeyForReason(r.failure.reason)}`, label: pushRejectLabel(r.failure.reason) };
-    }
-    return { key: 'unknown', label: 'unknown' };
-}
-function pushKeyForReason(reason) {
-    switch (reason) {
-        case 'workflow-scope-required':
-            return 'workflow-scope';
-        case 'branch-protection':
-            return 'branch-protection';
-        default:
-            return 'other';
-    }
-}
-function pushRejectLabel(reason) {
-    switch (reason) {
-        case 'workflow-scope-required':
-            return 'push rejected (workflow scope)';
-        case 'branch-protection':
-            return 'push rejected (branch protection)';
-        default:
-            return 'push rejected';
-    }
-}
-function escapePipes(s) {
-    return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
-}
-
-;// CONCATENATED MODULE: ./src/close-sources.ts
-
-
-class CloseSourcesOrchestrator {
-    gh;
-    constructor(gh) {
-        this.gh = gh;
-    }
-    async run(config) {
-        const batchPr = await this.findMostRecentMergedBatchPr(config);
-        if (!batchPr) {
-            throw new Error(`No merged batch PR found targeting ${config.baseBranch} with head prefix ${config.integrationBranchPrefix}`);
-        }
-        core.info(`Most recent merged batch PR: #${batchPr.number}`);
-        const passedPrs = ReportBuilder.parsePassedPrNumbers(batchPr.body ?? '');
-        core.info(`Batch PR records ${passedPrs.length} PASSed source PR(s)`);
-        const closed = [];
-        const skipped = [];
-        for (const number of passedPrs) {
-            try {
-                await this.closeWithComment(number, batchPr.number, batchPr.merge_commit_sha ?? '');
-                closed.push(number);
-            }
-            catch (err) {
-                core.warning(`Failed to close PR #${number}: ${err.message}`);
-                skipped.push(number);
-            }
-        }
-        return { batchPrNumber: batchPr.number, closedPrNumbers: closed, skippedPrNumbers: skipped };
-    }
-    async findMostRecentMergedBatchPr(config) {
-        const candidates = await this.gh.octokit.paginate(this.gh.octokit.rest.pulls.list, {
-            owner: this.gh.owner,
-            repo: this.gh.repo,
-            state: 'closed',
-            base: config.baseBranch,
-            sort: 'updated',
-            direction: 'desc',
-            per_page: 50,
-        });
-        return candidates.find((pr) => pr.merged_at !== null && pr.head.ref.startsWith(config.integrationBranchPrefix));
-    }
-    async closeWithComment(sourcePrNumber, batchPrNumber, mergeCommitSha) {
-        const shaSuffix = mergeCommitSha ? ` (merge commit ${mergeCommitSha.slice(0, 7)})` : '';
-        await this.gh.octokit.rest.issues.createComment({
-            owner: this.gh.owner,
-            repo: this.gh.repo,
-            issue_number: sourcePrNumber,
-            body: `Superseded by #${batchPrNumber}${shaSuffix}. Closing as part of the batch merge workflow.`,
-        });
-        await this.gh.octokit.rest.pulls.update({
-            owner: this.gh.owner,
-            repo: this.gh.repo,
-            pull_number: sourcePrNumber,
-            state: 'closed',
-        });
-    }
-}
-
 ;// CONCATENATED MODULE: ./src/config.ts
 
 class ConfigError extends Error {
 }
 const V1_ALLOWED_TARGET_REPO = 'Maersk-Global/ui-myfinance';
 function parseConfig() {
-    const mode = parseMode(core.getInput('mode') || 'batch');
     const { owner, repo } = resolveTargetRepo();
     const baseBranch = core.getInput('base-branch') || 'main';
     const integrationBranchPrefix = core.getInput('integration-branch-prefix') || 'chore/dependabot-batch';
-    if (mode === 'batch') {
-        const validationCommand = core.getInput('validation-command');
-        if (!validationCommand) {
-            throw new ConfigError('validation-command is required when mode=batch');
-        }
-        const config = {
-            mode,
-            owner,
-            repo,
-            baseBranch,
-            integrationBranchPrefix,
-            dependabotAuthor: core.getInput('dependabot-author') || 'dependabot[bot]',
-            validationCommand,
-            onFailure: parseFailureHandling(core.getInput('on-failure') || 'skip'),
-            reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
-            draftPr: parseBool(core.getInput('draft-pr'), true),
-            maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
-        };
-        return config;
+    const validationCommand = core.getInput('validation-command');
+    if (!validationCommand) {
+        throw new ConfigError('validation-command is required');
     }
-    const config = {
-        mode,
+    return {
         owner,
         repo,
         baseBranch,
         integrationBranchPrefix,
+        dependabotAuthor: core.getInput('dependabot-author') || 'dependabot[bot]',
+        validationCommand,
+        onFailure: parseFailureHandling(core.getInput('on-failure') || 'skip'),
+        reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
+        draftPr: parseBool(core.getInput('draft-pr'), true),
+        maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
+        closeSourcePrs: parseBool(core.getInput('close-source-prs'), false),
     };
-    return config;
 }
 // v1 is hard-locked to a single target repository. Onboarding other teams is
 // a deliberate follow-up — it requires a code change here (and a fresh release)
@@ -32267,11 +31979,6 @@ function resolveTargetRepo() {
     }
     const [owner, repo] = V1_ALLOWED_TARGET_REPO.split('/');
     return { owner, repo };
-}
-function parseMode(raw) {
-    if (raw === 'batch' || raw === 'close-sources')
-        return raw;
-    throw new ConfigError(`mode must be "batch" or "close-sources", got "${raw}"`);
 }
 function parseFailureHandling(raw) {
     if (raw === 'skip' || raw === 'revert-commit')
@@ -32522,6 +32229,28 @@ class BatchPRWriter {
     }
 }
 
+;// CONCATENATED MODULE: ./src/github/source-pr-closer.ts
+class SourcePRCloser {
+    gh;
+    constructor(gh) {
+        this.gh = gh;
+    }
+    async closeAsBundled(sourcePrNumber, batchPrNumber) {
+        await this.gh.octokit.rest.issues.createComment({
+            owner: this.gh.owner,
+            repo: this.gh.repo,
+            issue_number: sourcePrNumber,
+            body: `Bundled into batch PR #${batchPrNumber}. The update will land when #${batchPrNumber} merges.`,
+        });
+        await this.gh.octokit.rest.pulls.update({
+            owner: this.gh.owner,
+            repo: this.gh.repo,
+            pull_number: sourcePrNumber,
+            state: 'closed',
+        });
+    }
+}
+
 ;// CONCATENATED MODULE: ./src/orchestrator.ts
 
 class BatchOrchestrator {
@@ -32532,7 +32261,8 @@ class BatchOrchestrator {
     analyzer;
     reporter;
     prWriter;
-    constructor(prLister, branchManager, merger, validator, analyzer, reporter, prWriter) {
+    sourcePrCloser;
+    constructor(prLister, branchManager, merger, validator, analyzer, reporter, prWriter, sourcePrCloser) {
         this.prLister = prLister;
         this.branchManager = branchManager;
         this.merger = merger;
@@ -32540,6 +32270,7 @@ class BatchOrchestrator {
         this.analyzer = analyzer;
         this.reporter = reporter;
         this.prWriter = prWriter;
+        this.sourcePrCloser = sourcePrCloser;
     }
     async run(config) {
         const integrationBranch = await this.branchManager.createIntegrationBranch(config.integrationBranchPrefix, config.baseBranch);
@@ -32587,6 +32318,9 @@ class BatchOrchestrator {
             }));
             if (!config.draftPr) {
                 await this.prWriter.markPrAsReady(batchPr.number);
+            }
+            if (config.closeSourcePrs) {
+                await this.closePassedSourcePrs(results, batchPr.number);
             }
         }
         else {
@@ -32688,6 +32422,241 @@ class BatchOrchestrator {
             draft: true,
         });
     }
+    async closePassedSourcePrs(results, batchPrNumber) {
+        const passed = results.filter((r) => r.status === 'PASS');
+        if (passed.length === 0)
+            return;
+        core.info(`Closing ${passed.length} source PR(s) bundled into batch PR #${batchPrNumber}`);
+        for (const r of passed) {
+            try {
+                await this.sourcePrCloser.closeAsBundled(r.pr.number, batchPrNumber);
+                core.info(`Closed source PR #${r.pr.number}`);
+            }
+            catch (err) {
+                // Individual close failures (already closed, permissions, etc.) are
+                // recoverable — the batch PR is already up. Warn and keep going so a
+                // single stale PR doesn't block the rest from being closed.
+                core.warning(`Failed to close source PR #${r.pr.number}: ${err.message}`);
+            }
+        }
+    }
+}
+
+;// CONCATENATED MODULE: ./src/report/builder.ts
+const PASSED_PRS_BLOCK_START = '<!-- dependabot-batch-merge:passed-prs:start -->';
+const PASSED_PRS_BLOCK_END = '<!-- dependabot-batch-merge:passed-prs:end -->';
+// Documentation rendered alongside each failure category so reviewers don't
+// have to reverse-engineer what "npm 401" or "lockfile drift" means in this
+// repository's context.
+const CATEGORY_DESCRIPTIONS = {
+    'npm-auth-401': 'The runner has no credentials for `npm.pkg.github.com`. Check the workflow\'s GitHub Packages auth setup (`NODE_AUTH_TOKEN` env + `NPM_CONFIG_USERCONFIG`).',
+    'npm-forbidden-403': '`TARGET_REPO_PAT` (or whichever PAT feeds `NODE_AUTH_TOKEN`) lacks `Packages: Read` on the package\'s publisher repo, or the PAT is not SSO-authorized for the org.',
+    'lockfile-drift': '`npm ci` refuses to install because `package.json` and `package-lock.json` disagree. Regenerate the lockfile against the Dependabot bump and re-run.',
+    'peer-dep-conflict': 'npm cannot resolve a peer dependency requirement. Either pin a compatible version or accept the Dependabot upgrade alongside its peer.',
+    'missing-module': 'An import points at a module that isn\'t resolvable from the installed dependency tree. Likely a stale import after a package rename or a removed export.',
+    'type-error': 'TypeScript compilation failed. Usually a breaking API change in the bumped package — update the call site.',
+    'test-failure': 'Unit/component tests failed after the merge. The bump may have changed runtime behavior; inspect the failing spec.',
+    'install-error': 'An npm install step failed for a reason that doesn\'t match the more specific categories above. Read the tail for the exact error code.',
+    'build-error': 'Production build (`vite build` / rollup) failed after the merge.',
+    unknown: 'No known failure pattern matched the validation output. Inspect the tail manually.',
+    'merge-conflict': 'The Dependabot branch conflicts with another change already on the integration branch (often another Dependabot PR that touched the same lockfile).',
+    'push-workflow-scope': 'GitHub refused the push because the PR modifies `.github/workflows/*` and the PAT lacks the `workflow` scope (classic) or `Actions: Write` permission (fine-grained). Either re-scope the PAT or merge these PRs manually outside the batch.',
+    'push-branch-protection': 'The integration branch is protected. Loosen the rule for the action\'s identity (e.g. an exemption or `Allow specified actors to bypass`) or change the integration branch naming pattern.',
+    'push-other': 'The push was rejected for a reason that doesn\'t match the known patterns. Inspect the message for the underlying git/GitHub error.',
+};
+class ReportBuilder {
+    build(params) {
+        const passed = params.results.filter((r) => r.status === 'PASS');
+        const failed = params.results.filter((r) => r.status === 'FAIL');
+        const categoryCounts = countFailureCategories(failed);
+        return [
+            `## Dependabot batch merge`,
+            ``,
+            `Integration branch: \`${params.integrationBranch}\` → \`${params.baseBranch}\``,
+            `Processed: **${params.results.length}** · PASS: **${passed.length}** · FAIL: **${failed.length}**`,
+            ``,
+            this.categoryOverview(categoryCounts, failed.length),
+            ``,
+            this.summaryTable(params.results),
+            ``,
+            this.failureSection(failed),
+            ``,
+            this.finalSuiteSection(params.finalSuite),
+            ``,
+            this.passedPrsBlock(passed.map((r) => r.pr.number)),
+        ]
+            .filter((section) => section.length > 0)
+            .join('\n');
+    }
+    static parsePassedPrNumbers(body) {
+        const start = body.indexOf(PASSED_PRS_BLOCK_START);
+        const end = body.indexOf(PASSED_PRS_BLOCK_END);
+        if (start === -1 || end === -1 || end < start)
+            return [];
+        const block = body.slice(start + PASSED_PRS_BLOCK_START.length, end);
+        return block
+            .split(/[,\s]+/)
+            .map((token) => Number.parseInt(token, 10))
+            .filter((n) => Number.isInteger(n) && n > 0);
+    }
+    categoryOverview(counts, totalFailed) {
+        if (totalFailed === 0)
+            return '';
+        const lines = ['### Failure breakdown', '', '| Category | Count | What it means |', '| --- | ---: | --- |'];
+        const entries = [...counts.entries()].sort((a, b) => b[1].count - a[1].count);
+        for (const [key, { label, count }] of entries) {
+            const description = CATEGORY_DESCRIPTIONS[key] ?? '';
+            lines.push(`| ${escapePipes(label)} | ${count} | ${escapePipes(description)} |`);
+        }
+        return lines.join('\n');
+    }
+    summaryTable(results) {
+        if (results.length === 0)
+            return '_No Dependabot PRs were processed._';
+        const header = '| PR | Title | Result | Category | Notes |\n| --- | --- | --- | --- | --- |';
+        const rows = results.map((r) => {
+            const icon = r.status === 'PASS' ? '✅' : '❌';
+            let category = '';
+            let note = '';
+            if (r.status === 'PASS') {
+                category = '—';
+            }
+            else if (r.failure?.kind === 'merge-conflict') {
+                category = 'merge conflict';
+                note = `${r.failure.files.length} file(s) conflicted`;
+            }
+            else if (r.failure?.kind === 'validation-failed') {
+                category = r.failure.categoryLabel;
+                note = `exit ${r.failure.exitCode}: ${r.failure.cause}`;
+            }
+            else if (r.failure?.kind === 'push-rejected') {
+                category = pushRejectLabel(r.failure.reason);
+                note = r.failure.message;
+            }
+            return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(category)} | ${escapePipes(note)} |`;
+        });
+        return [header, ...rows].join('\n');
+    }
+    failureSection(failed) {
+        if (failed.length === 0)
+            return '';
+        // Group by category so reviewers see "37 PRs failed on npm 401" as one
+        // section instead of scrolling through 37 nearly-identical traces.
+        const grouped = new Map();
+        for (const r of failed) {
+            const { key, label } = classifyResult(r);
+            const bucket = grouped.get(key) ?? { label, results: [] };
+            bucket.results.push(r);
+            grouped.set(key, bucket);
+        }
+        const sections = ['## Failures'];
+        const ordered = [...grouped.entries()].sort((a, b) => b[1].results.length - a[1].results.length);
+        for (const [key, { label, results }] of ordered) {
+            sections.push(this.categorySection(key, label, results));
+        }
+        return sections.join('\n\n');
+    }
+    categorySection(key, label, results) {
+        const description = CATEGORY_DESCRIPTIONS[key];
+        const lines = [`### ${label} — ${results.length} PR(s)`];
+        if (description) {
+            lines.push('', `> ${description}`);
+        }
+        lines.push('');
+        for (const r of results) {
+            lines.push(this.failureEntry(r));
+        }
+        return lines.join('\n');
+    }
+    failureEntry(r) {
+        const head = `- [#${r.pr.number}](${r.pr.htmlUrl}) — ${r.pr.title}`;
+        if (r.failure?.kind === 'merge-conflict') {
+            const files = r.failure.files.map((f) => `    - \`${f}\``).join('\n');
+            return `${head}\n  Conflicting files:\n${files}`;
+        }
+        if (r.failure?.kind === 'validation-failed') {
+            return [
+                head,
+                `  - **Cause:** ${r.failure.cause}`,
+                `  - **Exit code:** ${r.failure.exitCode}`,
+                ``,
+                `  <details><summary>Validation output (tail)</summary>`,
+                ``,
+                // The cursor / static analyzer renders its own details block as part of
+                // the body; we strip the outer summary line and re-wrap inside the per-
+                // category block to keep nesting predictable.
+                r.failure.details,
+                ``,
+                `  </details>`,
+            ].join('\n');
+        }
+        if (r.failure?.kind === 'push-rejected') {
+            return `${head}\n  - **Push rejected:** ${r.failure.message}`;
+        }
+        return head;
+    }
+    finalSuiteSection(outcome) {
+        if (!outcome)
+            return '';
+        const icon = outcome.passed ? '✅' : '❌';
+        return [
+            `## Final suite re-run`,
+            `${icon} exit code ${outcome.exitCode}`,
+            ...(outcome.passed
+                ? []
+                : ['', '```', outcome.stderrTail || outcome.stdoutTail, '```']),
+        ].join('\n');
+    }
+    passedPrsBlock(numbers) {
+        return [PASSED_PRS_BLOCK_START, numbers.join(','), PASSED_PRS_BLOCK_END].join('\n');
+    }
+}
+function countFailureCategories(failed) {
+    const counts = new Map();
+    for (const r of failed) {
+        const { key, label } = classifyResult(r);
+        const existing = counts.get(key);
+        if (existing)
+            existing.count += 1;
+        else
+            counts.set(key, { label, count: 1 });
+    }
+    return counts;
+}
+function classifyResult(r) {
+    if (r.failure?.kind === 'merge-conflict') {
+        return { key: 'merge-conflict', label: 'merge conflict' };
+    }
+    if (r.failure?.kind === 'validation-failed') {
+        return { key: r.failure.category, label: r.failure.categoryLabel };
+    }
+    if (r.failure?.kind === 'push-rejected') {
+        return { key: `push-${pushKeyForReason(r.failure.reason)}`, label: pushRejectLabel(r.failure.reason) };
+    }
+    return { key: 'unknown', label: 'unknown' };
+}
+function pushKeyForReason(reason) {
+    switch (reason) {
+        case 'workflow-scope-required':
+            return 'workflow-scope';
+        case 'branch-protection':
+            return 'branch-protection';
+        default:
+            return 'other';
+    }
+}
+function pushRejectLabel(reason) {
+    switch (reason) {
+        case 'workflow-scope-required':
+            return 'push rejected (workflow scope)';
+        case 'branch-protection':
+            return 'push rejected (branch protection)';
+        default:
+            return 'push rejected';
+    }
+}
+function escapePipes(s) {
+    return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }
 
 ;// CONCATENATED MODULE: ./src/validation/command-runner.ts
@@ -32747,17 +32716,11 @@ async function main() {
     const config = parseConfig();
     const token = core.getInput('github-token', { required: true });
     const gh = new GitHubClient(token, config.owner, config.repo);
-    if (config.mode === 'batch') {
-        const summary = await runBatch(config, gh);
-        core.setOutput('batch-pr-number', summary.batchPrNumber ?? '');
-        core.setOutput('batch-pr-url', summary.batchPrUrl ?? '');
-        core.setOutput('pass-count', summary.results.filter((r) => r.status === 'PASS').length);
-        core.setOutput('fail-count', summary.results.filter((r) => r.status === 'FAIL').length);
-        return;
-    }
-    const closer = new CloseSourcesOrchestrator(gh);
-    const summary = await closer.run(config);
-    core.info(`Closed ${summary.closedPrNumbers.length} PR(s); skipped ${summary.skippedPrNumbers.length}`);
+    const summary = await runBatch(config, gh);
+    core.setOutput('batch-pr-number', summary.batchPrNumber ?? '');
+    core.setOutput('batch-pr-url', summary.batchPrUrl ?? '');
+    core.setOutput('pass-count', summary.results.filter((r) => r.status === 'PASS').length);
+    core.setOutput('fail-count', summary.results.filter((r) => r.status === 'FAIL').length);
 }
 async function runBatch(config, gh) {
     const gitRunner = new GitRunner();
@@ -32769,7 +32732,8 @@ async function runBatch(config, gh) {
     const reporter = new ReportBuilder();
     const prLister = new DependabotPRLister(gh);
     const prWriter = new BatchPRWriter(gh);
-    const orchestrator = new BatchOrchestrator(prLister, branchManager, merger, validator, analyzer, reporter, prWriter);
+    const sourcePrCloser = new SourcePRCloser(gh);
+    const orchestrator = new BatchOrchestrator(prLister, branchManager, merger, validator, analyzer, reporter, prWriter, sourcePrCloser);
     return orchestrator.run(config);
 }
 function buildAnalyzer() {
