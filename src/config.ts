@@ -40,7 +40,6 @@ export function parseConfig(): RunConfig {
     repo,
     baseBranch,
     integrationBranchPrefix,
-    closeSourcePrs: parseBool(core.getInput('close-source-prs'), false),
   };
   return config;
 }

@@ -44,10 +44,6 @@ inputs:
     description: 'Maximum number of Dependabot PRs to process in one run (safety cap).'
     required: false
     default: '20'
-  close-source-prs:
-    description: 'Used in mode=close-sources. If true, close PASSed source Dependabot PRs with a "Superseded by" comment.'
-    required: false
-    default: 'false'
   cursor-api-key:
     description: 'Cursor Cloud API key, used to generate failure explanations.'
     required: false

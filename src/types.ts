@@ -20,7 +20,6 @@ export interface CloseSourcesConfig {
   mode: 'close-sources';
   baseBranch: string;
   integrationBranchPrefix: string;
-  closeSourcePrs: boolean;
   owner: string;
   repo: string;
 }

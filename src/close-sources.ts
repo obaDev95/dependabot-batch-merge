@@ -24,11 +24,6 @@ export class CloseSourcesOrchestrator {
     const passedPrs = ReportBuilder.parsePassedPrNumbers(batchPr.body ?? '');
     core.info(`Batch PR records ${passedPrs.length} PASSed source PR(s)`);
 
-    if (!config.closeSourcePrs) {
-      core.info('close-source-prs is false — skipping close.');
-      return { batchPrNumber: batchPr.number, closedPrNumbers: [], skippedPrNumbers: passedPrs };
-    }
-
     const closed: number[] = [];
     const skipped: number[] = [];
     for (const number of passedPrs) {

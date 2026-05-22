@@ -1,4 +1,4 @@
-import './sourcemap-register.cjs';import { createRequire as __WEBPACK_EXTERNAL_createRequire } from "module";
+import { createRequire as __WEBPACK_EXTERNAL_createRequire } from "module";
 /******/ var __webpack_modules__ = ({
 
 /***/ 4914:
@@ -32174,10 +32174,6 @@ class CloseSourcesOrchestrator {
         core.info(`Most recent merged batch PR: #${batchPr.number}`);
         const passedPrs = ReportBuilder.parsePassedPrNumbers(batchPr.body ?? '');
         core.info(`Batch PR records ${passedPrs.length} PASSed source PR(s)`);
-        if (!config.closeSourcePrs) {
-            core.info('close-source-prs is false — skipping close.');
-            return { batchPrNumber: batchPr.number, closedPrNumbers: [], skippedPrNumbers: passedPrs };
-        }
         const closed = [];
         const skipped = [];
         for (const number of passedPrs) {
@@ -32257,7 +32253,6 @@ function parseConfig() {
         repo,
         baseBranch,
         integrationBranchPrefix,
-        closeSourcePrs: parseBool(core.getInput('close-source-prs'), false),
     };
     return config;
 }
@@ -32790,5 +32785,3 @@ main().catch((err) => {
     core.setFailed(message);
 });
 
-
-//# sourceMappingURL=index.js.map
