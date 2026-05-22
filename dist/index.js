@@ -31945,40 +31945,28 @@ function firstLine(text) {
 
 class ConfigError extends Error {
 }
-const V1_ALLOWED_TARGET_REPO = 'Maersk-Global/ui-myfinance';
+// v1 is hard-locked to a single target repository. The validation command is
+// the canonical pre-flight suite for ui-myfinance. Onboarding other repos
+// (or changing the suite) requires a deliberate code change here.
+const TARGET_OWNER = 'Maersk-Global';
+const TARGET_REPO = 'ui-myfinance';
+const VALIDATION_COMMAND = 'npm ci && npm run typecheck && npm test && npm run build';
 function parseConfig() {
-    const { owner, repo } = resolveTargetRepo();
     const baseBranch = core.getInput('base-branch') || 'main';
     const integrationBranchPrefix = core.getInput('integration-branch-prefix') || 'chore/dependabot-batch';
-    const validationCommand = core.getInput('validation-command');
-    if (!validationCommand) {
-        throw new ConfigError('validation-command is required');
-    }
     return {
-        owner,
-        repo,
+        owner: TARGET_OWNER,
+        repo: TARGET_REPO,
         baseBranch,
         integrationBranchPrefix,
         dependabotAuthor: core.getInput('dependabot-author') || 'dependabot[bot]',
-        validationCommand,
+        validationCommand: VALIDATION_COMMAND,
         onFailure: parseFailureHandling(core.getInput('on-failure') || 'skip'),
         reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
         draftPr: parseBool(core.getInput('draft-pr'), true),
         maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
         closeSourcePrs: parseBool(core.getInput('close-source-prs'), false),
     };
-}
-// v1 is hard-locked to a single target repository. Onboarding other teams is
-// a deliberate follow-up — it requires a code change here (and a fresh release)
-// so any expansion of scope is reviewed, not implicit.
-function resolveTargetRepo() {
-    const targetRepo = core.getInput('target-repo').trim();
-    if (targetRepo !== V1_ALLOWED_TARGET_REPO) {
-        throw new ConfigError(`target-repo must be "${V1_ALLOWED_TARGET_REPO}" in v1 (got "${targetRepo}"). ` +
-            `Onboarding additional repositories is a separate change.`);
-    }
-    const [owner, repo] = V1_ALLOWED_TARGET_REPO.split('/');
-    return { owner, repo };
 }
 function parseFailureHandling(raw) {
     if (raw === 'skip' || raw === 'revert-commit')

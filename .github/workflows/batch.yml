@@ -21,16 +21,6 @@ name: Dependabot batch merge
 on:
   workflow_dispatch:
     inputs:
-      target-repo:
-        description: 'Target repository. v1 only accepts "Maersk-Global/ui-myfinance"; any other value will be rejected by the action.'
-        required: true
-        type: string
-        default: 'Maersk-Global/ui-myfinance'
-      validation-command:
-        description: 'Shell command run after each merge to validate.'
-        required: true
-        type: string
-        default: 'npm ci && npm run typecheck && npm test && npm run build'
       max-prs:
         description: 'Safety cap on Dependabot PRs processed in one run. Increase if the backlog has grown beyond the default; the action otherwise picks the oldest N PRs and silently skips the rest.'
         required: false
@@ -69,10 +59,10 @@ jobs:
           fi
           echo "TARGET_REPO_PAT is present."
 
-      - name: Checkout target repository
+      - name: Checkout Maersk-Global/ui-myfinance
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.target-repo }}
+          repository: Maersk-Global/ui-myfinance
           token: ${{ secrets.TARGET_REPO_PAT }}
           fetch-depth: 0
           persist-credentials: true
@@ -118,8 +108,6 @@ jobs:
       - name: Run dependabot-batch-merge
         uses: obaDev95/dependabot-batch-merge@main
         with:
-          target-repo: ${{ inputs.target-repo }}
-          validation-command: ${{ inputs.validation-command }}
           max-prs: ${{ inputs.max-prs }}
           close-source-prs: ${{ inputs.close-source-prs && 'true' || 'false' }}
           cursor-api-key: ${{ secrets.CURSOR_API_KEY }}
