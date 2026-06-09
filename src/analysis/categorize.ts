@@ -49,8 +49,8 @@ const RULES: Rule[] = [
     refine: (text) => {
       const m = text.match(/GET\s+(https:\/\/npm\.pkg\.github\.com\/\S+)/);
       return m
-        ? `npm.pkg.github.com 401 fetching ${m[1]} â€” runner has no auth token`
-        : 'npm.pkg.github.com 401 â€” runner has no auth token';
+        ? `npm.pkg.github.com 401 fetching ${m[1]} — runner has no auth token`
+        : 'npm.pkg.github.com 401 — runner has no auth token';
     },
   },
   {
@@ -59,8 +59,8 @@ const RULES: Rule[] = [
     refine: (text) => {
       const m = text.match(/GET\s+(https:\/\/npm\.pkg\.github\.com\/\S+)/);
       return m
-        ? `npm.pkg.github.com 403 fetching ${m[1]} â€” PAT lacks Packages:Read on publisher repo`
-        : 'npm.pkg.github.com 403 â€” PAT lacks Packages:Read on publisher repo';
+        ? `npm.pkg.github.com 403 fetching ${m[1]} — PAT lacks Packages:Read on publisher repo`
+        : 'npm.pkg.github.com 403 — PAT lacks Packages:Read on publisher repo';
     },
   },
   {
@@ -138,7 +138,7 @@ const RULES: Rule[] = [
 
 export function categorizeFailure(validation: ValidationOutcome): CategorizedFailure {
   // ANSI escapes from coloured tooling output (vitest, npm) defeat ^/$
-  // anchors and \b boundaries â€” strip them before matching. Without this,
+  // anchors and \b boundaries — strip them before matching. Without this,
   // vitest's `FAIL <path>` line is preceded by SGR codes on the same line
   // and the regex misses every snapshot/test failure.
   const raw = `${validation.stderrTail || ''}\n${validation.stdoutTail || ''}`;
@@ -165,5 +165,5 @@ function stripAnsi(text: string): string {
 }
 
 function truncate(s: string, max: number): string {
-  return s.length > max ? `${s.slice(0, max - 1)}â€¦` : s;
+  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
 }
