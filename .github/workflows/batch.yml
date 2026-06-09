@@ -1,10 +1,9 @@
 name: Dependabot batch merge
 
 # Centralised orchestrator: dispatched from this repo, operates on the
-# Maersk-Global/ui-myfinance repository. v1 is hard-locked to that single
-# target — the action's config parser rejects any other target-repo value.
-# Onboarding additional teams is a deliberate follow-up that requires a
-# code change here (and a new release tag).
+# Maersk-Global/ui-myfinance repository. Owner/repo are hard-coded in
+# src/config.ts for v1. Onboarding additional teams is a deliberate follow-up
+# that requires a code change here (and a new release tag).
 #
 # Required repo secrets:
 #   TARGET_REPO_PAT  — PAT with Contents: RW + Pull requests: RW on
@@ -26,11 +25,6 @@ on:
         required: false
         type: number
         default: 50
-      close-source-prs:
-        description: 'Close each successfully merged source Dependabot PR with a "Bundled into batch PR #X" comment after the batch PR is opened/updated.'
-        required: false
-        type: boolean
-        default: false
 
 jobs:
   run:
@@ -109,6 +103,5 @@ jobs:
         uses: obaDev95/dependabot-batch-merge@main
         with:
           max-prs: ${{ inputs.max-prs }}
-          close-source-prs: ${{ inputs.close-source-prs && 'true' || 'false' }}
           cursor-api-key: ${{ secrets.CURSOR_API_KEY }}
           github-token: ${{ secrets.TARGET_REPO_PAT }}
