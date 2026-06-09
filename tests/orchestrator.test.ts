@@ -37,16 +37,16 @@ function makePr(overrides: Partial<DependabotPR> = {}): DependabotPR {
 describe('BatchOrchestrator', () => {
   it('records PASS when merge succeeds and validation passes', async () => {
     const pr = makePr();
-    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } satisfies Partial<DependabotPRLister> as DependabotPRLister;
+    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } as unknown as DependabotPRLister;
     const branchManager = {
       createIntegrationBranch: vi.fn().mockResolvedValue('chore/dependabot-batch-2026-05-14'),
       push: vi.fn().mockResolvedValue({ kind: 'pushed' }),
       fetchPr: vi.fn().mockResolvedValue(undefined),
-    } satisfies Partial<BranchManager> as BranchManager;
+    } as unknown as BranchManager;
     const merger = {
       merge: vi.fn().mockResolvedValue({ kind: 'merged' }),
       dropLastMerge: vi.fn(),
-    } satisfies Partial<PRMerger> as PRMerger;
+    } as unknown as PRMerger;
     const validator: ValidationRunner = {
       run: vi.fn().mockResolvedValue({ passed: true, exitCode: 0, stdoutTail: '', stderrTail: '' }),
     };
@@ -56,7 +56,7 @@ describe('BatchOrchestrator', () => {
       createPr: vi.fn().mockResolvedValue({ number: 99, url: 'https://example.test/pull/99' }),
       updatePrBody: vi.fn().mockResolvedValue(undefined),
       markPrAsReady: vi.fn().mockResolvedValue(undefined),
-    } satisfies Partial<BatchPRWriter> as BatchPRWriter;
+    } as unknown as BatchPRWriter;
 
     const orchestrator = new BatchOrchestrator(
       prLister,
@@ -79,16 +79,16 @@ describe('BatchOrchestrator', () => {
 
   it('records FAIL with merge-conflict and does not call validator', async () => {
     const pr = makePr({ number: 2 });
-    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } satisfies Partial<DependabotPRLister> as DependabotPRLister;
+    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } as unknown as DependabotPRLister;
     const branchManager = {
       createIntegrationBranch: vi.fn().mockResolvedValue('chore/dependabot-batch-2026-05-14'),
       push: vi.fn(),
       fetchPr: vi.fn().mockResolvedValue(undefined),
-    } satisfies Partial<BranchManager> as BranchManager;
+    } as unknown as BranchManager;
     const merger = {
       merge: vi.fn().mockResolvedValue({ kind: 'conflict', conflictedFiles: ['package.json'] }),
       dropLastMerge: vi.fn(),
-    } satisfies Partial<PRMerger> as PRMerger;
+    } as unknown as PRMerger;
     const validator: ValidationRunner = { run: vi.fn() };
     const analyzer: FailureAnalyzer = { explain: vi.fn() };
     const prWriter = {
@@ -96,7 +96,7 @@ describe('BatchOrchestrator', () => {
       createPr: vi.fn().mockResolvedValue({ number: 99, url: 'u' }),
       updatePrBody: vi.fn().mockResolvedValue(undefined),
       markPrAsReady: vi.fn(),
-    } satisfies Partial<BatchPRWriter> as BatchPRWriter;
+    } as unknown as BatchPRWriter;
 
     const orchestrator = new BatchOrchestrator(
       prLister,
@@ -118,16 +118,16 @@ describe('BatchOrchestrator', () => {
 
   it('drops the failed merge and asks the analyzer to explain on validation failure', async () => {
     const pr = makePr({ number: 3 });
-    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } satisfies Partial<DependabotPRLister> as DependabotPRLister;
+    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } as unknown as DependabotPRLister;
     const branchManager = {
       createIntegrationBranch: vi.fn().mockResolvedValue('chore/dependabot-batch-2026-05-14'),
       push: vi.fn(),
       fetchPr: vi.fn().mockResolvedValue(undefined),
-    } satisfies Partial<BranchManager> as BranchManager;
+    } as unknown as BranchManager;
     const merger = {
       merge: vi.fn().mockResolvedValue({ kind: 'merged' }),
       dropLastMerge: vi.fn().mockResolvedValue(undefined),
-    } satisfies Partial<PRMerger> as PRMerger;
+    } as unknown as PRMerger;
     const validator: ValidationRunner = {
       run: vi
         .fn()
@@ -148,7 +148,7 @@ describe('BatchOrchestrator', () => {
       createPr: vi.fn().mockResolvedValue({ number: 99, url: 'u' }),
       updatePrBody: vi.fn().mockResolvedValue(undefined),
       markPrAsReady: vi.fn(),
-    } satisfies Partial<BatchPRWriter> as BatchPRWriter;
+    } as unknown as BatchPRWriter;
 
     const orchestrator = new BatchOrchestrator(
       prLister,
