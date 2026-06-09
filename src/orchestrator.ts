@@ -9,10 +9,26 @@ import type {
   BatchConfig,
   BatchSummary,
   DependabotPR,
+  FailureExplanation,
+  MergeOutcome,
   PRResult,
+  PushRejectReason,
   ValidationOutcome,
 } from './types';
 import type { ValidationRunner } from './validation/command-runner';
+
+/** PATCH the batch PR body at most every N processed PRs during the merge loop. */
+const BODY_UPDATE_INTERVAL = 5;
+
+type ProcessStepOutcome =
+  | { kind: 'pass'; pushed: boolean }
+  | { kind: 'merge-conflict'; files: string[] }
+  | {
+      kind: 'push-rejected';
+      reason: PushRejectReason;
+      message: string;
+    }
+  | { kind: 'validation-failed'; explanation: FailureExplanation; pushed: boolean };
 
 export class BatchOrchestrator {
   constructor(
@@ -57,7 +73,8 @@ export class BatchOrchestrator {
 
     const results: PRResult[] = [];
 
-    for (const pr of candidates) {
+    for (let i = 0; i < candidates.length; i++) {
+      const pr = candidates[i]!;
       core.startGroup(`Processing PR #${pr.number} — ${pr.title}`);
       const { result, pushed } = await this.processPr(pr, config, integrationBranch);
       results.push(result);
@@ -65,15 +82,8 @@ export class BatchOrchestrator {
       if (pushed && !batchPr) {
         batchPr = await this.openBatchPr(integrationBranch, config);
       }
-      if (batchPr) {
-        await this.prWriter.updatePrBody(
-          batchPr.number,
-          this.reporter.build({
-            integrationBranch,
-            baseBranch: config.baseBranch,
-            results,
-          }),
-        );
+      if (batchPr && this.shouldUpdateBodyDuringLoop(i)) {
+        await this.updateBatchPrBody(batchPr.number, integrationBranch, config.baseBranch, results);
       }
       core.endGroup();
     }
@@ -85,14 +95,12 @@ export class BatchOrchestrator {
     }
 
     if (batchPr) {
-      await this.prWriter.updatePrBody(
+      await this.updateBatchPrBody(
         batchPr.number,
-        this.reporter.build({
-          integrationBranch,
-          baseBranch: config.baseBranch,
-          results,
-          finalSuite,
-        }),
+        integrationBranch,
+        config.baseBranch,
+        results,
+        finalSuite,
       );
       if (!config.draftPr) {
         await this.prWriter.markPrAsReady(batchPr.number);
@@ -108,6 +116,28 @@ export class BatchOrchestrator {
     };
   }
 
+  private shouldUpdateBodyDuringLoop(processedIndex: number): boolean {
+    return (processedIndex + 1) % BODY_UPDATE_INTERVAL === 0;
+  }
+
+  private async updateBatchPrBody(
+    prNumber: number,
+    integrationBranch: string,
+    baseBranch: string,
+    results: PRResult[],
+    finalSuite?: ValidationOutcome,
+  ): Promise<void> {
+    await this.prWriter.updatePrBody(
+      prNumber,
+      this.reporter.build({
+        integrationBranch,
+        baseBranch,
+        results,
+        ...(finalSuite && { finalSuite }),
+      }),
+    );
+  }
+
   private async processPr(
     pr: DependabotPR,
     config: BatchConfig,
@@ -115,48 +145,65 @@ export class BatchOrchestrator {
   ): Promise<{ result: PRResult; pushed: boolean }> {
     await this.branchManager.fetchPr(pr.headRef);
 
-    const mergeOutcome = await this.merger.merge(pr);
+    const mergeOutcome = await this.attemptMerge(pr);
     if (mergeOutcome.kind === 'conflict') {
       core.warning(`Merge conflict for PR #${pr.number}`);
       return {
-        result: {
-          pr,
-          status: 'FAIL',
-          failure: { kind: 'merge-conflict', files: mergeOutcome.conflictedFiles ?? [] },
-        },
+        result: this.toPrResult(pr, {
+          kind: 'merge-conflict',
+          files: mergeOutcome.conflictedFiles ?? [],
+        }),
         pushed: false,
       };
     }
 
     const validation = await this.validator.run();
     if (validation.passed) {
-      const pushOutcome = await this.branchManager.push(integrationBranch);
-      if (pushOutcome.kind === 'pushed') {
-        core.info(`PR #${pr.number} PASS`);
-        return { result: { pr, status: 'PASS' }, pushed: true };
-      }
-      // Push refused (workflow scope / branch protection / other). Roll the
-      // merge back so subsequent PRs see a clean integration branch tip,
-      // then record the rejection and let the loop continue. A previous
-      // version threw here and killed the whole run on the first refusal.
-      core.warning(
-        `PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`,
-      );
-      await this.merger.dropLastMerge('skip', pr);
-      return {
-        result: {
-          pr,
-          status: 'FAIL',
-          failure: {
-            kind: 'push-rejected',
-            reason: pushOutcome.reason,
-            message: pushOutcome.message,
-          },
-        },
-        pushed: false,
-      };
+      return this.validateAndPush(pr, integrationBranch, validation);
     }
 
+    return this.handleValidationFailure(pr, config, integrationBranch, validation);
+  }
+
+  private async attemptMerge(pr: DependabotPR): Promise<MergeOutcome> {
+    return this.merger.merge(pr);
+  }
+
+  private async validateAndPush(
+    pr: DependabotPR,
+    integrationBranch: string,
+    _validation: ValidationOutcome,
+  ): Promise<{ result: PRResult; pushed: boolean }> {
+    const pushOutcome = await this.branchManager.push(integrationBranch);
+    if (pushOutcome.kind === 'pushed') {
+      core.info(`PR #${pr.number} PASS`);
+      return { result: this.toPrResult(pr, { kind: 'pass', pushed: true }), pushed: true };
+    }
+
+    // Push refused (workflow scope / branch protection / other). Roll the
+    // merge back so subsequent PRs see a clean integration branch tip,
+    // then record the rejection and let the loop continue. A previous
+    // version threw here and killed the whole run on the first refusal.
+    core.warning(
+      `PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`,
+    );
+    await this.merger.dropLastMerge('skip', pr);
+    return {
+      result: this.toPrResult(pr, {
+        kind: 'push-rejected',
+        reason: pushOutcome.reason,
+        message: pushOutcome.message,
+      }),
+      pushed: false,
+    };
+  }
+
+  private async handleValidationFailure(
+    pr: DependabotPR,
+    config: BatchConfig,
+    integrationBranch: string,
+    validation: ValidationOutcome,
+  ): Promise<{ result: PRResult; pushed: boolean }> {
     core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
     const explanation = await this.analyzer.explain({ pr, validation });
     core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
@@ -173,21 +220,46 @@ export class BatchOrchestrator {
       }
     }
     return {
-      result: {
-        pr,
-        status: 'FAIL',
-        failure: {
-          kind: 'validation-failed',
-          category: explanation.category,
-          categoryLabel: explanation.categoryLabel,
-          cause: explanation.cause,
-          exitCode: explanation.exitCode,
-          summary: explanation.summary,
-          details: explanation.body,
-        },
-      },
+      result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed }),
       pushed,
     };
+  }
+
+  private toPrResult(pr: DependabotPR, outcome: ProcessStepOutcome): PRResult {
+    switch (outcome.kind) {
+      case 'pass':
+        return { pr, status: 'PASS' };
+      case 'merge-conflict':
+        return {
+          pr,
+          status: 'FAIL',
+          failure: { kind: 'merge-conflict', files: outcome.files },
+        };
+      case 'push-rejected':
+        return {
+          pr,
+          status: 'FAIL',
+          failure: {
+            kind: 'push-rejected',
+            reason: outcome.reason,
+            message: outcome.message,
+          },
+        };
+      case 'validation-failed':
+        return {
+          pr,
+          status: 'FAIL',
+          failure: {
+            kind: 'validation-failed',
+            category: outcome.explanation.category,
+            categoryLabel: outcome.explanation.categoryLabel,
+            cause: outcome.explanation.cause,
+            exitCode: outcome.explanation.exitCode,
+            summary: outcome.explanation.summary,
+            details: outcome.explanation.body,
+          },
+        };
+    }
   }
 
   private placeholderBody(
@@ -217,5 +289,4 @@ export class BatchOrchestrator {
       draft: true,
     });
   }
-
 }
