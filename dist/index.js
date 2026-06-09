@@ -1,4 +1,4 @@
-import { createRequire as __WEBPACK_EXTERNAL_createRequire } from "module";
+import './sourcemap-register.cjs';import { createRequire as __WEBPACK_EXTERNAL_createRequire } from "module";
 /******/ var __webpack_modules__ = ({
 
 /***/ 4914:
@@ -31712,8 +31712,8 @@ const RULES = [
         refine: (text) => {
             const m = text.match(/GET\s+(https:\/\/npm\.pkg\.github\.com\/\S+)/);
             return m
-                ? `npm.pkg.github.com 401 fetching ${m[1]} — runner has no auth token`
-                : 'npm.pkg.github.com 401 — runner has no auth token';
+                ? `npm.pkg.github.com 401 fetching ${m[1]} � runner has no auth token`
+                : 'npm.pkg.github.com 401 � runner has no auth token';
         },
     },
     {
@@ -31722,8 +31722,8 @@ const RULES = [
         refine: (text) => {
             const m = text.match(/GET\s+(https:\/\/npm\.pkg\.github\.com\/\S+)/);
             return m
-                ? `npm.pkg.github.com 403 fetching ${m[1]} — PAT lacks Packages:Read on publisher repo`
-                : 'npm.pkg.github.com 403 — PAT lacks Packages:Read on publisher repo';
+                ? `npm.pkg.github.com 403 fetching ${m[1]} � PAT lacks Packages:Read on publisher repo`
+                : 'npm.pkg.github.com 403 � PAT lacks Packages:Read on publisher repo';
         },
     },
     {
@@ -31805,7 +31805,7 @@ const RULES = [
 ];
 function categorizeFailure(validation) {
     // ANSI escapes from coloured tooling output (vitest, npm) defeat ^/$
-    // anchors and \b boundaries — strip them before matching. Without this,
+    // anchors and \b boundaries � strip them before matching. Without this,
     // vitest's `FAIL <path>` line is preceded by SGR codes on the same line
     // and the regex misses every snapshot/test failure.
     const raw = `${validation.stderrTail || ''}\n${validation.stdoutTail || ''}`;
@@ -31829,7 +31829,7 @@ function stripAnsi(text) {
     return text.replace(ANSI_PATTERN, '');
 }
 function truncate(s, max) {
-    return s.length > max ? `${s.slice(0, max - 1)}…` : s;
+    return s.length > max ? `${s.slice(0, max - 1)}�` : s;
 }
 
 ;// CONCATENATED MODULE: ./src/analysis/analyzer.ts
@@ -31941,56 +31941,6 @@ function firstLine(text) {
     return idx === -1 ? text.trim() : text.slice(0, idx).trim();
 }
 
-;// CONCATENATED MODULE: ./src/config.ts
-
-class ConfigError extends Error {
-}
-// v1 is hard-locked to a single target repository. The validation command is
-// the canonical pre-flight suite for ui-myfinance. Onboarding other repos
-// (or changing the suite) requires a deliberate code change here.
-const TARGET_OWNER = 'Maersk-Global';
-const TARGET_REPO = 'ui-myfinance';
-const VALIDATION_COMMAND = 'npm ci && npm run typecheck && npm test && npm run build';
-function parseConfig() {
-    const baseBranch = core.getInput('base-branch') || 'main';
-    const integrationBranchPrefix = core.getInput('integration-branch-prefix') || 'chore/dependabot-batch';
-    return {
-        owner: TARGET_OWNER,
-        repo: TARGET_REPO,
-        baseBranch,
-        integrationBranchPrefix,
-        dependabotAuthor: core.getInput('dependabot-author') || 'dependabot[bot]',
-        validationCommand: VALIDATION_COMMAND,
-        onFailure: parseFailureHandling(core.getInput('on-failure') || 'skip'),
-        reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
-        draftPr: parseBool(core.getInput('draft-pr'), true),
-        maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
-        closeSourcePrs: parseBool(core.getInput('close-source-prs'), false),
-    };
-}
-function parseFailureHandling(raw) {
-    if (raw === 'skip' || raw === 'revert-commit')
-        return raw;
-    throw new ConfigError(`on-failure must be "skip" or "revert-commit", got "${raw}"`);
-}
-function parseBool(raw, fallback) {
-    if (!raw)
-        return fallback;
-    const normalized = raw.trim().toLowerCase();
-    if (['true', '1', 'yes'].includes(normalized))
-        return true;
-    if (['false', '0', 'no'].includes(normalized))
-        return false;
-    throw new ConfigError(`expected boolean, got "${raw}"`);
-}
-function parsePositiveInt(raw, name) {
-    const n = Number(raw);
-    if (!Number.isInteger(n) || n <= 0) {
-        throw new ConfigError(`${name} must be a positive integer, got "${raw}"`);
-    }
-    return n;
-}
-
 ;// CONCATENATED MODULE: ./src/git/branch-manager.ts
 class BranchManager {
     git;
@@ -32061,7 +32011,11 @@ class GitRunner {
                 },
             },
         });
-        return { exitCode, stdout, stderr };
+        return {
+            exitCode,
+            stdout,
+            stderr,
+        };
     }
     async configureIdentity(name, email) {
         await this.run(['config', 'user.name', name]);
@@ -32217,30 +32171,10 @@ class BatchPRWriter {
     }
 }
 
-;// CONCATENATED MODULE: ./src/github/source-pr-closer.ts
-class SourcePRCloser {
-    gh;
-    constructor(gh) {
-        this.gh = gh;
-    }
-    async closeAsBundled(sourcePrNumber, batchPrNumber) {
-        await this.gh.octokit.rest.issues.createComment({
-            owner: this.gh.owner,
-            repo: this.gh.repo,
-            issue_number: sourcePrNumber,
-            body: `Bundled into batch PR #${batchPrNumber}. The update will land when #${batchPrNumber} merges.`,
-        });
-        await this.gh.octokit.rest.pulls.update({
-            owner: this.gh.owner,
-            repo: this.gh.repo,
-            pull_number: sourcePrNumber,
-            state: 'closed',
-        });
-    }
-}
-
 ;// CONCATENATED MODULE: ./src/orchestrator.ts
 
+/** PATCH the batch PR body at most every N processed PRs during the merge loop. */
+const BODY_UPDATE_INTERVAL = 5;
 class BatchOrchestrator {
     prLister;
     branchManager;
@@ -32249,8 +32183,7 @@ class BatchOrchestrator {
     analyzer;
     reporter;
     prWriter;
-    sourcePrCloser;
-    constructor(prLister, branchManager, merger, validator, analyzer, reporter, prWriter, sourcePrCloser) {
+    constructor(prLister, branchManager, merger, validator, analyzer, reporter, prWriter) {
         this.prLister = prLister;
         this.branchManager = branchManager;
         this.merger = merger;
@@ -32258,7 +32191,6 @@ class BatchOrchestrator {
         this.analyzer = analyzer;
         this.reporter = reporter;
         this.prWriter = prWriter;
-        this.sourcePrCloser = sourcePrCloser;
     }
     async run(config) {
         const integrationBranch = await this.branchManager.createIntegrationBranch(config.integrationBranchPrefix, config.baseBranch);
@@ -32276,19 +32208,16 @@ class BatchOrchestrator {
             await this.prWriter.updatePrBody(batchPr.number, this.placeholderBody(integrationBranch, config, candidates.length));
         }
         const results = [];
-        for (const pr of candidates) {
+        for (let i = 0; i < candidates.length; i++) {
+            const pr = candidates[i];
             core.startGroup(`Processing PR #${pr.number} — ${pr.title}`);
             const { result, pushed } = await this.processPr(pr, config, integrationBranch);
             results.push(result);
             if (pushed && !batchPr) {
                 batchPr = await this.openBatchPr(integrationBranch, config);
             }
-            if (batchPr) {
-                await this.prWriter.updatePrBody(batchPr.number, this.reporter.build({
-                    integrationBranch,
-                    baseBranch: config.baseBranch,
-                    results,
-                }));
+            if (batchPr && this.shouldUpdateBodyDuringLoop(i)) {
+                await this.updateBatchPrBody(batchPr.number, integrationBranch, config.baseBranch, results);
             }
             core.endGroup();
         }
@@ -32298,17 +32227,9 @@ class BatchOrchestrator {
             finalSuite = await this.validator.run();
         }
         if (batchPr) {
-            await this.prWriter.updatePrBody(batchPr.number, this.reporter.build({
-                integrationBranch,
-                baseBranch: config.baseBranch,
-                results,
-                finalSuite,
-            }));
+            await this.updateBatchPrBody(batchPr.number, integrationBranch, config.baseBranch, results, finalSuite);
             if (!config.draftPr) {
                 await this.prWriter.markPrAsReady(batchPr.number);
-            }
-            if (config.closeSourcePrs) {
-                await this.closePassedSourcePrs(results, batchPr.number);
             }
         }
         else {
@@ -32320,46 +32241,61 @@ class BatchOrchestrator {
             ...(finalSuite && { finalSuite }),
         };
     }
+    shouldUpdateBodyDuringLoop(processedIndex) {
+        return (processedIndex + 1) % BODY_UPDATE_INTERVAL === 0;
+    }
+    async updateBatchPrBody(prNumber, integrationBranch, baseBranch, results, finalSuite) {
+        await this.prWriter.updatePrBody(prNumber, this.reporter.build({
+            integrationBranch,
+            baseBranch,
+            results,
+            ...(finalSuite && { finalSuite }),
+        }));
+    }
     async processPr(pr, config, integrationBranch) {
         await this.branchManager.fetchPr(pr.headRef);
-        const mergeOutcome = await this.merger.merge(pr);
+        const mergeOutcome = await this.attemptMerge(pr);
         if (mergeOutcome.kind === 'conflict') {
             core.warning(`Merge conflict for PR #${pr.number}`);
             return {
-                result: {
-                    pr,
-                    status: 'FAIL',
-                    failure: { kind: 'merge-conflict', files: mergeOutcome.conflictedFiles ?? [] },
-                },
+                result: this.toPrResult(pr, {
+                    kind: 'merge-conflict',
+                    files: mergeOutcome.conflictedFiles ?? [],
+                }),
                 pushed: false,
             };
         }
         const validation = await this.validator.run();
         if (validation.passed) {
-            const pushOutcome = await this.branchManager.push(integrationBranch);
-            if (pushOutcome.kind === 'pushed') {
-                core.info(`PR #${pr.number} PASS`);
-                return { result: { pr, status: 'PASS' }, pushed: true };
-            }
-            // Push refused (workflow scope / branch protection / other). Roll the
-            // merge back so subsequent PRs see a clean integration branch tip,
-            // then record the rejection and let the loop continue. A previous
-            // version threw here and killed the whole run on the first refusal.
-            core.warning(`PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`);
-            await this.merger.dropLastMerge('skip', pr);
-            return {
-                result: {
-                    pr,
-                    status: 'FAIL',
-                    failure: {
-                        kind: 'push-rejected',
-                        reason: pushOutcome.reason,
-                        message: pushOutcome.message,
-                    },
-                },
-                pushed: false,
-            };
+            return this.validateAndPush(pr, integrationBranch, validation);
         }
+        return this.handleValidationFailure(pr, config, integrationBranch, validation);
+    }
+    async attemptMerge(pr) {
+        return this.merger.merge(pr);
+    }
+    async validateAndPush(pr, integrationBranch, _validation) {
+        const pushOutcome = await this.branchManager.push(integrationBranch);
+        if (pushOutcome.kind === 'pushed') {
+            core.info(`PR #${pr.number} PASS`);
+            return { result: this.toPrResult(pr, { kind: 'pass', pushed: true }), pushed: true };
+        }
+        // Push refused (workflow scope / branch protection / other). Roll the
+        // merge back so subsequent PRs see a clean integration branch tip,
+        // then record the rejection and let the loop continue. A previous
+        // version threw here and killed the whole run on the first refusal.
+        core.warning(`PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`);
+        await this.merger.dropLastMerge('skip', pr);
+        return {
+            result: this.toPrResult(pr, {
+                kind: 'push-rejected',
+                reason: pushOutcome.reason,
+                message: pushOutcome.message,
+            }),
+            pushed: false,
+        };
+    }
+    async handleValidationFailure(pr, config, integrationBranch, validation) {
         core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
         const explanation = await this.analyzer.explain({ pr, validation });
         core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
@@ -32375,21 +32311,45 @@ class BatchOrchestrator {
             }
         }
         return {
-            result: {
-                pr,
-                status: 'FAIL',
-                failure: {
-                    kind: 'validation-failed',
-                    category: explanation.category,
-                    categoryLabel: explanation.categoryLabel,
-                    cause: explanation.cause,
-                    exitCode: explanation.exitCode,
-                    summary: explanation.summary,
-                    details: explanation.body,
-                },
-            },
+            result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed }),
             pushed,
         };
+    }
+    toPrResult(pr, outcome) {
+        switch (outcome.kind) {
+            case 'pass':
+                return { pr, status: 'PASS' };
+            case 'merge-conflict':
+                return {
+                    pr,
+                    status: 'FAIL',
+                    failure: { kind: 'merge-conflict', files: outcome.files },
+                };
+            case 'push-rejected':
+                return {
+                    pr,
+                    status: 'FAIL',
+                    failure: {
+                        kind: 'push-rejected',
+                        reason: outcome.reason,
+                        message: outcome.message,
+                    },
+                };
+            case 'validation-failed':
+                return {
+                    pr,
+                    status: 'FAIL',
+                    failure: {
+                        kind: 'validation-failed',
+                        category: outcome.explanation.category,
+                        categoryLabel: outcome.explanation.categoryLabel,
+                        cause: outcome.explanation.cause,
+                        exitCode: outcome.explanation.exitCode,
+                        summary: outcome.explanation.summary,
+                        details: outcome.explanation.body,
+                    },
+                };
+        }
     }
     placeholderBody(integrationBranch, config, candidateCount) {
         const initialBody = this.reporter.build({
@@ -32409,24 +32369,6 @@ class BatchOrchestrator {
             body: this.placeholderBody(integrationBranch, config, 0),
             draft: true,
         });
-    }
-    async closePassedSourcePrs(results, batchPrNumber) {
-        const passed = results.filter((r) => r.status === 'PASS');
-        if (passed.length === 0)
-            return;
-        core.info(`Closing ${passed.length} source PR(s) bundled into batch PR #${batchPrNumber}`);
-        for (const r of passed) {
-            try {
-                await this.sourcePrCloser.closeAsBundled(r.pr.number, batchPrNumber);
-                core.info(`Closed source PR #${r.pr.number}`);
-            }
-            catch (err) {
-                // Individual close failures (already closed, permissions, etc.) are
-                // recoverable — the batch PR is already up. Warn and keep going so a
-                // single stale PR doesn't block the rest from being closed.
-                core.warning(`Failed to close source PR #${r.pr.number}: ${err.message}`);
-            }
-        }
     }
 }
 
@@ -32683,10 +32625,7 @@ function tail(text, bytes) {
     return `…(truncated)…\n${text.slice(-bytes)}`;
 }
 
-;// CONCATENATED MODULE: ./src/index.ts
-
-
-
+;// CONCATENATED MODULE: ./src/batch.ts
 
 
 
@@ -32700,40 +32639,87 @@ function tail(text, bytes) {
 
 const GIT_BOT_NAME = 'dependabot-batch-merge[bot]';
 const GIT_BOT_EMAIL = 'dependabot-batch-merge@users.noreply.github.com';
+async function executeBatch(options) {
+    const { config, token, cursorApiKey } = options;
+    const gitRunner = new GitRunner();
+    await gitRunner.configureIdentity(GIT_BOT_NAME, GIT_BOT_EMAIL);
+    const gh = new GitHubClient(token, config.owner, config.repo);
+    const branchManager = new BranchManager(gitRunner);
+    const merger = new PRMerger(gitRunner);
+    const validator = new CommandValidationRunner(config.validationCommand);
+    const analyzer = buildAnalyzer(cursorApiKey);
+    const reporter = new ReportBuilder();
+    const prLister = new DependabotPRLister(gh);
+    const prWriter = new BatchPRWriter(gh);
+    const orchestrator = new BatchOrchestrator(prLister, branchManager, merger, validator, analyzer, reporter, prWriter);
+    return orchestrator.run(config);
+}
+function buildAnalyzer(cursorApiKey) {
+    if (!cursorApiKey)
+        return new StaticFailureAnalyzer();
+    return new CursorFailureAnalyzer({ apiKey: cursorApiKey });
+}
+
+;// CONCATENATED MODULE: ./src/config.ts
+
+class ConfigError extends Error {
+}
+const DEFAULT_VALIDATION_COMMAND = 'npm ci && npm run typecheck && npm test && npm run build';
+function parseConfig() {
+    return {
+        owner: 'Maersk-Global',
+        repo: 'ui-myfinance',
+        baseBranch: core.getInput('base-branch') || 'main',
+        integrationBranchPrefix: core.getInput('integration-branch-prefix') || 'chore/dependabot-batch',
+        dependabotAuthor: core.getInput('dependabot-author') || 'dependabot[bot]',
+        validationCommand: core.getInput('validation-command') || DEFAULT_VALIDATION_COMMAND,
+        onFailure: parseFailureHandling(core.getInput('on-failure') || 'skip'),
+        reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
+        draftPr: parseBool(core.getInput('draft-pr'), true),
+        maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
+    };
+}
+function parseFailureHandling(raw) {
+    if (raw === 'skip' || raw === 'revert-commit')
+        return raw;
+    throw new ConfigError(`on-failure must be "skip" or "revert-commit", got "${raw}"`);
+}
+function parseBool(raw, fallback) {
+    if (!raw)
+        return fallback;
+    const normalized = raw.trim().toLowerCase();
+    if (['true', '1', 'yes'].includes(normalized))
+        return true;
+    if (['false', '0', 'no'].includes(normalized))
+        return false;
+    throw new ConfigError(`expected boolean, got "${raw}"`);
+}
+function parsePositiveInt(raw, name) {
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n <= 0) {
+        throw new ConfigError(`${name} must be a positive integer, got "${raw}"`);
+    }
+    return n;
+}
+
+;// CONCATENATED MODULE: ./src/index.ts
+
+
+
 async function main() {
     const config = parseConfig();
     const token = core.getInput('github-token', { required: true });
-    const gh = new GitHubClient(token, config.owner, config.repo);
-    const summary = await runBatch(config, gh);
+    const cursorApiKey = core.getInput('cursor-api-key') || undefined;
+    const summary = await executeBatch({ config, token, cursorApiKey });
     core.setOutput('batch-pr-number', summary.batchPrNumber ?? '');
     core.setOutput('batch-pr-url', summary.batchPrUrl ?? '');
     core.setOutput('pass-count', summary.results.filter((r) => r.status === 'PASS').length);
     core.setOutput('fail-count', summary.results.filter((r) => r.status === 'FAIL').length);
-}
-async function runBatch(config, gh) {
-    const gitRunner = new GitRunner();
-    await gitRunner.configureIdentity(GIT_BOT_NAME, GIT_BOT_EMAIL);
-    const branchManager = new BranchManager(gitRunner);
-    const merger = new PRMerger(gitRunner);
-    const validator = new CommandValidationRunner(config.validationCommand);
-    const analyzer = buildAnalyzer();
-    const reporter = new ReportBuilder();
-    const prLister = new DependabotPRLister(gh);
-    const prWriter = new BatchPRWriter(gh);
-    const sourcePrCloser = new SourcePRCloser(gh);
-    const orchestrator = new BatchOrchestrator(prLister, branchManager, merger, validator, analyzer, reporter, prWriter, sourcePrCloser);
-    return orchestrator.run(config);
-}
-function buildAnalyzer() {
-    const apiKey = core.getInput('cursor-api-key');
-    if (!apiKey) {
-        core.info('cursor-api-key not provided — falling back to static failure explanations');
-        return new StaticFailureAnalyzer();
-    }
-    return new CursorFailureAnalyzer({ apiKey });
 }
 main().catch((err) => {
     const message = err instanceof Error ? err.stack || err.message : String(err);
     core.setFailed(message);
 });
 
+
+//# sourceMappingURL=index.js.map
