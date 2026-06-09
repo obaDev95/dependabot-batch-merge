@@ -3,14 +3,17 @@ import type { BatchConfig, FailureHandling } from './types';
 
 export class ConfigError extends Error {}
 
+const DEFAULT_VALIDATION_COMMAND = 'npm ci && npm run typecheck && npm test && npm run build';
+
 export function parseConfig(): BatchConfig {
   return {
     owner: 'Maersk-Global',
     repo: 'ui-myfinance',
-    baseBranch: 'main',
-    integrationBranchPrefix: 'chore/dependabot-batch',
-    dependabotAuthor: 'dependabot[bot]',
-    validationCommand: 'npm ci && npm run typecheck && npm test && npm run build',
+    baseBranch: core.getInput('base-branch') || 'main',
+    integrationBranchPrefix:
+      core.getInput('integration-branch-prefix') || 'chore/dependabot-batch',
+    dependabotAuthor: core.getInput('dependabot-author') || 'dependabot[bot]',
+    validationCommand: core.getInput('validation-command') || DEFAULT_VALIDATION_COMMAND,
     onFailure: parseFailureHandling(core.getInput('on-failure') || 'skip'),
     reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
     draftPr: parseBool(core.getInput('draft-pr'), true),

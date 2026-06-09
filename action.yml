@@ -18,6 +18,10 @@ inputs:
     description: 'GitHub login used to identify Dependabot PRs.'
     required: false
     default: 'dependabot[bot]'
+  validation-command:
+    description: 'Shell command run after each merge. Runs through bash -lc.'
+    required: false
+    default: 'npm ci && npm run typecheck && npm test && npm run build'
   on-failure:
     description: 'How to handle a PR that fails validation: "skip" (drop the merge) or "revert-commit" (keep merge, add revert).'
     required: false
