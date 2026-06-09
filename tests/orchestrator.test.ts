@@ -6,7 +6,6 @@ import type { BranchManager } from '../src/git/branch-manager';
 import type { PRMerger } from '../src/git/merger';
 import type { DependabotPRLister } from '../src/github/pr-lister';
 import type { BatchPRWriter } from '../src/github/pr-writer';
-import type { SourcePRCloser } from '../src/github/source-pr-closer';
 import type { ValidationRunner } from '../src/validation/command-runner';
 import type { BatchConfig, DependabotPR } from '../src/types';
 
@@ -21,7 +20,6 @@ const baseConfig: BatchConfig = {
   reRunFinalSuite: false,
   draftPr: true,
   maxPrs: 20,
-  closeSourcePrs: false,
 };
 
 function makePr(overrides: Partial<DependabotPR> = {}): DependabotPR {
@@ -34,10 +32,6 @@ function makePr(overrides: Partial<DependabotPR> = {}): DependabotPR {
     createdAt: '2026-01-01T00:00:00Z',
     ...overrides,
   };
-}
-
-function makeCloser(): SourcePRCloser {
-  return { closeAsBundled: vi.fn().mockResolvedValue(undefined) } as unknown as SourcePRCloser;
 }
 
 describe('BatchOrchestrator', () => {
@@ -63,7 +57,6 @@ describe('BatchOrchestrator', () => {
       updatePrBody: vi.fn().mockResolvedValue(undefined),
       markPrAsReady: vi.fn().mockResolvedValue(undefined),
     } satisfies Partial<BatchPRWriter> as BatchPRWriter;
-    const closer = makeCloser();
 
     const orchestrator = new BatchOrchestrator(
       prLister,
@@ -73,7 +66,6 @@ describe('BatchOrchestrator', () => {
       analyzer,
       new ReportBuilder(),
       prWriter,
-      closer,
     );
 
     const summary = await orchestrator.run(baseConfig);
@@ -83,48 +75,6 @@ describe('BatchOrchestrator', () => {
     expect(merger.dropLastMerge).not.toHaveBeenCalled();
     expect(branchManager.push).toHaveBeenCalledWith('chore/dependabot-batch-2026-05-14');
     expect(analyzer.explain).not.toHaveBeenCalled();
-    expect(closer.closeAsBundled).not.toHaveBeenCalled();
-  });
-
-  it('closes PASSed source PRs when closeSourcePrs is true', async () => {
-    const pr = makePr({ number: 7 });
-    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } satisfies Partial<DependabotPRLister> as DependabotPRLister;
-    const branchManager = {
-      createIntegrationBranch: vi.fn().mockResolvedValue('chore/dependabot-batch-2026-05-14'),
-      push: vi.fn().mockResolvedValue({ kind: 'pushed' }),
-      fetchPr: vi.fn().mockResolvedValue(undefined),
-    } satisfies Partial<BranchManager> as BranchManager;
-    const merger = {
-      merge: vi.fn().mockResolvedValue({ kind: 'merged' }),
-      dropLastMerge: vi.fn(),
-    } satisfies Partial<PRMerger> as PRMerger;
-    const validator: ValidationRunner = {
-      run: vi.fn().mockResolvedValue({ passed: true, exitCode: 0, stdoutTail: '', stderrTail: '' }),
-    };
-    const analyzer: FailureAnalyzer = { explain: vi.fn() };
-    const prWriter = {
-      findExistingPr: vi.fn().mockResolvedValue(null),
-      createPr: vi.fn().mockResolvedValue({ number: 99, url: 'https://example.test/pull/99' }),
-      updatePrBody: vi.fn().mockResolvedValue(undefined),
-      markPrAsReady: vi.fn().mockResolvedValue(undefined),
-    } satisfies Partial<BatchPRWriter> as BatchPRWriter;
-    const closer = makeCloser();
-
-    const orchestrator = new BatchOrchestrator(
-      prLister,
-      branchManager,
-      merger,
-      validator,
-      analyzer,
-      new ReportBuilder(),
-      prWriter,
-      closer,
-    );
-
-    await orchestrator.run({ ...baseConfig, closeSourcePrs: true });
-
-    expect(closer.closeAsBundled).toHaveBeenCalledOnce();
-    expect(closer.closeAsBundled).toHaveBeenCalledWith(7, 99);
   });
 
   it('records FAIL with merge-conflict and does not call validator', async () => {
@@ -147,7 +97,6 @@ describe('BatchOrchestrator', () => {
       updatePrBody: vi.fn().mockResolvedValue(undefined),
       markPrAsReady: vi.fn(),
     } satisfies Partial<BatchPRWriter> as BatchPRWriter;
-    const closer = makeCloser();
 
     const orchestrator = new BatchOrchestrator(
       prLister,
@@ -157,16 +106,14 @@ describe('BatchOrchestrator', () => {
       analyzer,
       new ReportBuilder(),
       prWriter,
-      closer,
     );
 
-    const summary = await orchestrator.run({ ...baseConfig, closeSourcePrs: true });
+    const summary = await orchestrator.run(baseConfig);
 
     expect(summary.results[0]?.status).toBe('FAIL');
     expect(summary.results[0]?.failure?.kind).toBe('merge-conflict');
     expect(validator.run).not.toHaveBeenCalled();
     expect(analyzer.explain).not.toHaveBeenCalled();
-    expect(closer.closeAsBundled).not.toHaveBeenCalled();
   });
 
   it('drops the failed merge and asks the analyzer to explain on validation failure', async () => {
@@ -202,7 +149,6 @@ describe('BatchOrchestrator', () => {
       updatePrBody: vi.fn().mockResolvedValue(undefined),
       markPrAsReady: vi.fn(),
     } satisfies Partial<BatchPRWriter> as BatchPRWriter;
-    const closer = makeCloser();
 
     const orchestrator = new BatchOrchestrator(
       prLister,
@@ -212,15 +158,13 @@ describe('BatchOrchestrator', () => {
       analyzer,
       new ReportBuilder(),
       prWriter,
-      closer,
     );
 
-    const summary = await orchestrator.run({ ...baseConfig, closeSourcePrs: true });
+    const summary = await orchestrator.run(baseConfig);
 
     expect(summary.results[0]?.status).toBe('FAIL');
     expect(merger.dropLastMerge).toHaveBeenCalledWith('skip', pr);
     expect(analyzer.explain).toHaveBeenCalledOnce();
-    expect(closer.closeAsBundled).not.toHaveBeenCalled();
   });
 });
 

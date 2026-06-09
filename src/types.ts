@@ -9,7 +9,6 @@ export interface BatchConfig {
   reRunFinalSuite: boolean;
   draftPr: boolean;
   maxPrs: number;
-  closeSourcePrs: boolean;
   owner: string;
   repo: string;
 }

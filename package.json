@@ -4,8 +4,12 @@
   "description": "GitHub Action that batches Dependabot PRs into one integration branch, validates each merge, and opens a single PR to the base branch.",
   "private": true,
   "type": "module",
+  "bin": {
+    "dependabot-batch-merge-mcp": "dist-mcp/index.js"
+  },
   "scripts": {
     "build": "ncc build src/index.ts -o dist --source-map --license licenses.txt",
+    "build:mcp": "ncc build src/mcp-server.ts -o dist-mcp --source-map --license licenses.txt",
     "typecheck": "tsc --noEmit",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
@@ -15,7 +19,8 @@
   "dependencies": {
     "@actions/core": "^1.11.1",
     "@actions/exec": "^1.1.1",
-    "@actions/github": "^6.0.0"
+    "@actions/github": "^6.0.0",
+    "@modelcontextprotocol/sdk": "^1.29.0"
   },
   "devDependencies": {
     "@types/node": "^20.14.0",

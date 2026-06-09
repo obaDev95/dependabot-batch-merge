@@ -21,7 +21,12 @@ export class GitRunner {
         },
       },
     });
-    return { exitCode, stdout, stderr };
+
+    return {
+      exitCode,
+      stdout,
+      stderr,
+    };
   }
 
   async configureIdentity(name: string, email: string): Promise<void> {

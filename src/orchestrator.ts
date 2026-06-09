@@ -4,7 +4,6 @@ import type { BranchManager } from './git/branch-manager';
 import type { PRMerger } from './git/merger';
 import type { DependabotPRLister } from './github/pr-lister';
 import type { BatchPRRef, BatchPRWriter } from './github/pr-writer';
-import type { SourcePRCloser } from './github/source-pr-closer';
 import type { ReportBuilder } from './report/builder';
 import type {
   BatchConfig,
@@ -24,7 +23,6 @@ export class BatchOrchestrator {
     private readonly analyzer: FailureAnalyzer,
     private readonly reporter: ReportBuilder,
     private readonly prWriter: BatchPRWriter,
-    private readonly sourcePrCloser: SourcePRCloser,
   ) {}
 
   async run(config: BatchConfig): Promise<BatchSummary> {
@@ -98,9 +96,6 @@ export class BatchOrchestrator {
       );
       if (!config.draftPr) {
         await this.prWriter.markPrAsReady(batchPr.number);
-      }
-      if (config.closeSourcePrs) {
-        await this.closePassedSourcePrs(results, batchPr.number);
       }
     } else {
       core.info('No commits landed on the integration branch — no batch PR opened.');
@@ -223,23 +218,4 @@ export class BatchOrchestrator {
     });
   }
 
-  private async closePassedSourcePrs(
-    results: PRResult[],
-    batchPrNumber: number,
-  ): Promise<void> {
-    const passed = results.filter((r) => r.status === 'PASS');
-    if (passed.length === 0) return;
-    core.info(`Closing ${passed.length} source PR(s) bundled into batch PR #${batchPrNumber}`);
-    for (const r of passed) {
-      try {
-        await this.sourcePrCloser.closeAsBundled(r.pr.number, batchPrNumber);
-        core.info(`Closed source PR #${r.pr.number}`);
-      } catch (err) {
-        // Individual close failures (already closed, permissions, etc.) are
-        // recoverable — the batch PR is already up. Warn and keep going so a
-        // single stale PR doesn't block the rest from being closed.
-        core.warning(`Failed to close source PR #${r.pr.number}: ${(err as Error).message}`);
-      }
-    }
-  }
 }

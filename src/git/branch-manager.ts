@@ -33,7 +33,11 @@ export class BranchManager {
     if (result.exitCode === 0) return { kind: 'pushed' };
 
     const combined = `${result.stderr}\n${result.stdout}`;
-    if (/refusing to allow a (?:Personal Access Token|GitHub App) to (?:create or update workflow|workflow)/i.test(combined)) {
+    if (
+      /refusing to allow a (?:Personal Access Token|GitHub App) to (?:create or update workflow|workflow)/i.test(
+        combined,
+      )
+    ) {
       return {
         kind: 'rejected',
         reason: 'workflow-scope-required',
@@ -45,7 +49,8 @@ export class BranchManager {
       return {
         kind: 'rejected',
         reason: 'branch-protection',
-        message: 'GitHub refused the push due to branch protection rules on the integration branch.',
+        message:
+          'GitHub refused the push due to branch protection rules on the integration branch.',
       };
     }
     return {
