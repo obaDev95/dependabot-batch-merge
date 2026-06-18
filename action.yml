@@ -38,9 +38,17 @@ inputs:
     description: 'Maximum number of Dependabot PRs to process in one run (safety cap).'
     required: false
     default: '20'
-  cursor-api-key:
-    description: 'Cursor Cloud API key, used to generate failure explanations.'
+  anthropic-api-key:
+    description: 'Anthropic API key. Used for Claude-powered failure explanations and, when agentic-resolve is true, for autonomous fix attempts.'
     required: false
+  agentic-resolve:
+    description: 'When true, invoke a Claude agent to attempt to fix merge conflicts and validation failures before recording them as failures.'
+    required: false
+    default: 'false'
+  agent-timeout-seconds:
+    description: 'Per-attempt timeout in seconds for the Claude agent. Ignored when agentic-resolve is false.'
+    required: false
+    default: '600'
   github-token:
     description: 'Token used for GitHub API calls. Defaults to the workflow GITHUB_TOKEN.'
     required: false
