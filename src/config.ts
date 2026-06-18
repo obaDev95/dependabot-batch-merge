@@ -18,6 +18,8 @@ export function parseConfig(): BatchConfig {
     reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
     draftPr: parseBool(core.getInput('draft-pr'), true),
     maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
+    agenticResolve: parseBool(core.getInput('agentic-resolve'), false),
+    agentTimeoutSeconds: parsePositiveInt(core.getInput('agent-timeout-seconds') || '600', 'agent-timeout-seconds'),
   };
 }
 

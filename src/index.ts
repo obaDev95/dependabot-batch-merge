@@ -5,9 +5,9 @@ import { parseConfig } from './config';
 async function main(): Promise<void> {
   const config = parseConfig();
   const token = core.getInput('github-token', { required: true });
-  const cursorApiKey = core.getInput('cursor-api-key') || undefined;
+  const anthropicApiKey = core.getInput('anthropic-api-key') || undefined;
 
-  const summary = await executeBatch({ config, token, cursorApiKey });
+  const summary = await executeBatch({ config, token, anthropicApiKey });
 
   core.setOutput('batch-pr-number', summary.batchPrNumber ?? '');
   core.setOutput('batch-pr-url', summary.batchPrUrl ?? '');
