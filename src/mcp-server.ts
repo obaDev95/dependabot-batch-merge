@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
@@ -14,11 +15,13 @@ server.registerTool(
   {
     title: 'Run batch merge',
     description:
-      'Batch open Dependabot PRs into one integration branch, validate each merge, and open a single PR to the base branch.',
+      'Batch open Dependabot PRs into one integration branch, validate each merge, and open a single PR to the base branch. ' +
+      'Defaults: token from $GITHUB_TOKEN/$GH_TOKEN, anthropicApiKey from $ANTHROPIC_API_KEY, repo from $BATCH_MERGE_REPO. ' +
+      'Run from inside a checkout of the target repo — the tool operates on the current working directory.',
     inputSchema: {
-      token: z.string().describe('GitHub token with repo scope'),
+      token: z.string().optional().describe('GitHub token with repo scope. Defaults to $GITHUB_TOKEN or $GH_TOKEN.'),
       owner: z.string().default('Maersk-Global').describe('GitHub repository owner'),
-      repo: z.string().default('ui-myfinance').describe('GitHub repository name'),
+      repo: z.string().optional().describe('GitHub repository name. Defaults to $BATCH_MERGE_REPO.'),
       baseBranch: z.string().default('main').describe('Base branch for the batch PR'),
       integrationBranchPrefix: z
         .string()
@@ -43,15 +46,17 @@ server.registerTool(
         .positive()
         .default(20)
         .describe('Maximum Dependabot PRs to process'),
-      cursorApiKey: z
+      anthropicApiKey: z
         .string()
         .optional()
-        .describe('Cursor Cloud API key for failure explanations'),
+        .describe('Anthropic API key for Claude-powered failure explanations and agentic resolution. Defaults to $ANTHROPIC_API_KEY.'),
+      agenticResolve: z.boolean().default(false).describe('Invoke Claude agent to attempt fixes before recording failures'),
+      agentTimeoutSeconds: z.number().int().positive().default(600).describe('Per-attempt timeout for the Claude agent'),
     },
   },
   async ({
     token,
-    cursorApiKey,
+    anthropicApiKey,
     owner,
     repo,
     baseBranch,
@@ -61,11 +66,23 @@ server.registerTool(
     reRunFinalSuite,
     draftPr,
     maxPrs,
+    agenticResolve,
+    agentTimeoutSeconds,
   }) => {
+    const resolvedToken = token ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
+    if (!resolvedToken) {
+      throw new Error('Set GITHUB_TOKEN (or GH_TOKEN) in your environment, or pass token explicitly.');
+    }
+    const resolvedRepo = repo ?? process.env.BATCH_MERGE_REPO;
+    if (!resolvedRepo) {
+      throw new Error('Set BATCH_MERGE_REPO in your environment, or pass repo explicitly.');
+    }
+    const resolvedApiKey = anthropicApiKey ?? process.env.ANTHROPIC_API_KEY;
+
     const summary = await executeBatch({
       config: {
         owner,
-        repo,
+        repo: resolvedRepo,
         baseBranch,
         integrationBranchPrefix,
         validationCommand,
@@ -74,9 +91,11 @@ server.registerTool(
         draftPr,
         maxPrs,
         dependabotAuthor: 'dependabot[bot]',
+        agenticResolve,
+        agentTimeoutSeconds,
       },
-      token,
-      cursorApiKey,
+      token: resolvedToken,
+      anthropicApiKey: resolvedApiKey,
     });
 
     const passCount = summary.results.filter((r) => r.status === 'PASS').length;
