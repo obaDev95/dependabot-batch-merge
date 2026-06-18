@@ -2,9 +2,41 @@
 
 A GitHub Action that consolidates open Dependabot pull requests into a single integration branch, validates each merge with a configurable suite, and opens one batch PR against the base branch.
 
-Failures are explained by a Cursor Cloud agent when an API key is configured; otherwise a static "exit code + stderr tail" explanation is written into the batch PR body.
+Failures are explained by a Claude agent when an Anthropic API key is configured; otherwise a static "exit code + stderr tail" explanation is written into the batch PR body. With `agentic-resolve: true`, a Claude agent also attempts to fix merge conflicts and validation failures before recording them.
 
-> **v1 scope.** The action is hard-coded to `Maersk-Global/ui-myfinance` in `src/config.ts`. Onboarding additional repositories is a deliberate follow-up that requires a code change and a new release. v1 also supports manual dispatch only — scheduled runs are a planned follow-up.
+> **v1 scope.** The packaged GitHub Action is hard-coded to `Maersk-Global/ui-myfinance` in `src/config.ts`. The MCP server (below) supports any Maersk repo via env vars — that's the recommended path for other teams.
+
+## Use from Claude Code CLI (recommended for other teams)
+
+Any Maersk team can run the batch merge on demand from their own terminal. Each developer brings their own GitHub PAT and Anthropic API key; **no secrets cross team boundaries**, and Anthropic usage hits the invoking developer's own account.
+
+### Install
+
+```bash
+claude mcp add dependabot-batch-merge -s user \
+  -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
+  -e GITHUB_TOKEN=$GH_TOKEN \
+  -e BATCH_MERGE_REPO=<your-repo-name> \
+  -- npx -y github:Maersk-Global/dependabot-batch-merge
+```
+
+Substitute `<your-repo-name>` with your team's repo (e.g. `ui-yourservice`). The `owner` defaults to `Maersk-Global`; pass `owner: '<other-org>'` as a tool argument if you need a different org.
+
+### Run
+
+1. `cd` into a fresh checkout of the target repo. The orchestrator does real git operations on the working directory — be in a clean clone.
+2. Open Claude Code and prompt: **`run batch merge with agenticResolve true`** (or omit `agenticResolve` to get today's read-only report flow).
+3. Claude will invoke the `run-batch-merge` MCP tool. It cuts an integration branch, merges open Dependabot PRs one-by-one, runs your validation suite after each, and opens a draft batch PR on your repo.
+
+### Environment variables
+
+| Env var | Purpose | Required |
+| --- | --- | --- |
+| `GITHUB_TOKEN` (or `GH_TOKEN`) | PAT with `Contents: RW` and `Pull requests: RW` on the target repo. | yes |
+| `ANTHROPIC_API_KEY` | Your Anthropic key. Enables Claude-powered failure explanations and (with `agenticResolve: true`) autonomous fix attempts. | optional |
+| `BATCH_MERGE_REPO` | Default repository name. Override per call via the `repo` tool argument. | yes (unless `repo` passed) |
+
+Any tool argument always wins over the corresponding env var, so a single install can still serve multiple repos by passing `repo: '<other-repo>'` per invocation.
 
 ## How it works
 
@@ -65,7 +97,7 @@ The workflow checks out `Maersk-Global/ui-myfinance`, configures npm auth for Gi
 | Secret | Required | Purpose |
 | --- | --- | --- |
 | `TARGET_REPO_PAT` | yes | PAT with **Contents: RW** and **Pull requests: RW** on `Maersk-Global/ui-myfinance`. Used both for `actions/checkout` and for the action's GitHub API calls. |
-| `CURSOR_API_KEY` | optional | Cursor Cloud API key. Without it, validation failures fall back to a static explanation (exit code + stderr tail). |
+| `ANTHROPIC_API_KEY` | optional | Anthropic API key. Without it, validation failures fall back to a static explanation (exit code + stderr tail) and `agentic-resolve` is unavailable. |
 
 ## Action inputs (full list)
 
