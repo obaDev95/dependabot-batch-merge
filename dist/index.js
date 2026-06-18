@@ -31856,17 +31856,13 @@ class StaticFailureAnalyzer {
     }
 }
 
-;// CONCATENATED MODULE: ./src/analysis/cursor-analyzer.ts
+;// CONCATENATED MODULE: ./src/analysis/claude-analyzer.ts
 
 
 
-// NOTE: The exact Cursor Cloud / Background Agents API surface should be confirmed against
-// https://docs.cursor.com before relying on this in production. This implementation targets
-// a generic JSON endpoint that accepts a prompt and returns a text response. If the live API
-// shape differs, only `callCursor` below needs to change — the rest of the orchestration is
-// already insulated behind the FailureAnalyzer interface.
-const DEFAULT_ENDPOINT = 'https://api.cursor.com/v0/agents/runs';
-class CursorFailureAnalyzer {
+const CLAUDE_API_URL = 'https://api.anthropic.com/v1/messages';
+const MODEL = 'claude-opus-4-7';
+class ClaudeFailureAnalyzer {
     opts;
     fallback;
     fetchImpl;
@@ -31878,7 +31874,7 @@ class CursorFailureAnalyzer {
     async explain(input) {
         const { category, label, cause } = categorizeFailure(input.validation);
         try {
-            const text = await this.callCursor(this.buildPrompt(input));
+            const text = await this.callClaude(this.buildPrompt(input));
             return {
                 category,
                 categoryLabel: label,
@@ -31889,7 +31885,7 @@ class CursorFailureAnalyzer {
             };
         }
         catch (err) {
-            core.warning(`Cursor analyzer failed, using fallback: ${err.message}`);
+            core.warning(`Claude analyzer failed, using fallback: ${err.message}`);
             return this.fallback.explain(input);
         }
     }
@@ -31915,23 +31911,27 @@ class CursorFailureAnalyzer {
                 `Begin with a one-line summary suitable as the first line of a Markdown report.`,
         ].join('\n');
     }
-    async callCursor(prompt) {
-        const endpoint = this.opts.endpoint ?? DEFAULT_ENDPOINT;
-        const res = await this.fetchImpl(endpoint, {
+    async callClaude(prompt) {
+        const res = await this.fetchImpl(CLAUDE_API_URL, {
             method: 'POST',
             headers: {
                 'content-type': 'application/json',
-                authorization: `Bearer ${this.opts.apiKey}`,
+                'x-api-key': this.opts.apiKey,
+                'anthropic-version': '2023-06-01',
             },
-            body: JSON.stringify({ prompt }),
+            body: JSON.stringify({
+                model: MODEL,
+                max_tokens: 512,
+                messages: [{ role: 'user', content: prompt }],
+            }),
         });
         if (!res.ok) {
-            throw new Error(`Cursor API responded ${res.status}: ${await res.text()}`);
+            throw new Error(`Claude API responded ${res.status}: ${await res.text()}`);
         }
         const json = (await res.json());
-        const text = json.text ?? json.output ?? json.message;
+        const text = json.content?.find((b) => b.type === 'text')?.text;
         if (!text) {
-            throw new Error('Cursor API response missing text/output/message field');
+            throw new Error('Claude API response missing text content block');
         }
         return text;
     }
@@ -32035,8 +32035,18 @@ class PRMerger {
             return { kind: 'merged' };
         }
         const conflictedFiles = await this.detectConflicts();
-        await this.git.run(['merge', '--abort'], { ignoreReturnCode: true });
+        // ponytail: caller decides abort vs. agent resolution — don't abort here
         return { kind: 'conflict', conflictedFiles };
+    }
+    async abortMerge() {
+        await this.git.run(['merge', '--abort'], { ignoreReturnCode: true });
+    }
+    async headSha() {
+        const result = await this.git.run(['rev-parse', 'HEAD']);
+        return result.stdout.trim();
+    }
+    async resetTo(sha) {
+        await this.git.run(['reset', '--hard', sha]);
     }
     async dropLastMerge(mode, pr) {
         if (mode === 'skip') {
@@ -32183,7 +32193,8 @@ class BatchOrchestrator {
     analyzer;
     reporter;
     prWriter;
-    constructor(prLister, branchManager, merger, validator, analyzer, reporter, prWriter) {
+    resolver;
+    constructor(prLister, branchManager, merger, validator, analyzer, reporter, prWriter, resolver) {
         this.prLister = prLister;
         this.branchManager = branchManager;
         this.merger = merger;
@@ -32191,6 +32202,7 @@ class BatchOrchestrator {
         this.analyzer = analyzer;
         this.reporter = reporter;
         this.prWriter = prWriter;
+        this.resolver = resolver;
     }
     async run(config) {
         const integrationBranch = await this.branchManager.createIntegrationBranch(config.integrationBranchPrefix, config.baseBranch);
@@ -32254,49 +32266,72 @@ class BatchOrchestrator {
     }
     async processPr(pr, config, integrationBranch) {
         await this.branchManager.fetchPr(pr.headRef);
+        const preMergeSha = await this.merger.headSha();
         const mergeOutcome = await this.attemptMerge(pr);
         if (mergeOutcome.kind === 'conflict') {
-            core.warning(`Merge conflict for PR #${pr.number}`);
-            return {
-                result: this.toPrResult(pr, {
-                    kind: 'merge-conflict',
-                    files: mergeOutcome.conflictedFiles ?? [],
-                }),
-                pushed: false,
-            };
+            return this.handleMergeConflict(pr, config, integrationBranch, mergeOutcome.conflictedFiles ?? [], preMergeSha);
         }
         const validation = await this.validator.run();
         if (validation.passed) {
             return this.validateAndPush(pr, integrationBranch, validation);
         }
-        return this.handleValidationFailure(pr, config, integrationBranch, validation);
+        return this.handleValidationFailure(pr, config, integrationBranch, validation, preMergeSha);
     }
-    async attemptMerge(pr) {
-        return this.merger.merge(pr);
-    }
-    async validateAndPush(pr, integrationBranch, _validation) {
-        const pushOutcome = await this.branchManager.push(integrationBranch);
-        if (pushOutcome.kind === 'pushed') {
-            core.info(`PR #${pr.number} PASS`);
-            return { result: this.toPrResult(pr, { kind: 'pass', pushed: true }), pushed: true };
+    async handleMergeConflict(pr, config, integrationBranch, conflictedFiles, preMergeSha) {
+        if (config.agenticResolve) {
+            const resolution = await this.resolver.resolveConflict({ pr, conflictedFiles });
+            if (resolution.kind === 'resolved') {
+                const agentAttempt = {
+                    commitSha: resolution.commitSha,
+                    summary: resolution.summary,
+                    outputTail: resolution.outputTail,
+                };
+                const validation = await this.validator.run();
+                if (validation.passed) {
+                    return this.validateAndPush(pr, integrationBranch, validation, agentAttempt);
+                }
+                core.warning(`PR #${pr.number}: agent conflict fix did not pass validation, resetting`);
+                await this.merger.resetTo(preMergeSha);
+                const explanation = await this.analyzer.explain({ pr, validation });
+                return {
+                    result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed: false }, agentAttempt),
+                    pushed: false,
+                };
+            }
+            core.warning(`PR #${pr.number}: agent gave up on conflict: ${resolution.reason}`);
         }
-        // Push refused (workflow scope / branch protection / other). Roll the
-        // merge back so subsequent PRs see a clean integration branch tip,
-        // then record the rejection and let the loop continue. A previous
-        // version threw here and killed the whole run on the first refusal.
-        core.warning(`PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`);
-        await this.merger.dropLastMerge('skip', pr);
+        await this.merger.abortMerge();
+        core.warning(`Merge conflict for PR #${pr.number}`);
         return {
-            result: this.toPrResult(pr, {
-                kind: 'push-rejected',
-                reason: pushOutcome.reason,
-                message: pushOutcome.message,
-            }),
+            result: this.toPrResult(pr, { kind: 'merge-conflict', files: conflictedFiles }),
             pushed: false,
         };
     }
-    async handleValidationFailure(pr, config, integrationBranch, validation) {
+    async handleValidationFailure(pr, config, integrationBranch, validation, preMergeSha) {
         core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
+        if (config.agenticResolve) {
+            const resolution = await this.resolver.resolveValidation({ pr, validation });
+            if (resolution.kind === 'resolved') {
+                const agentAttempt = {
+                    commitSha: resolution.commitSha,
+                    summary: resolution.summary,
+                    outputTail: resolution.outputTail,
+                };
+                const revalidation = await this.validator.run();
+                if (revalidation.passed) {
+                    return this.validateAndPush(pr, integrationBranch, revalidation, agentAttempt);
+                }
+                core.warning(`PR #${pr.number}: agent validation fix did not pass revalidation, resetting`);
+                await this.merger.resetTo(preMergeSha);
+                const explanation = await this.analyzer.explain({ pr, validation: revalidation });
+                core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
+                return {
+                    result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed: false }, agentAttempt),
+                    pushed: false,
+                };
+            }
+            core.warning(`PR #${pr.number}: agent gave up on validation fix: ${resolution.reason}`);
+        }
         const explanation = await this.analyzer.explain({ pr, validation });
         core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
         await this.merger.dropLastMerge(config.onFailure, pr);
@@ -32315,15 +32350,39 @@ class BatchOrchestrator {
             pushed,
         };
     }
-    toPrResult(pr, outcome) {
+    async attemptMerge(pr) {
+        return this.merger.merge(pr);
+    }
+    async validateAndPush(pr, integrationBranch, _validation, agentAttempt) {
+        const pushOutcome = await this.branchManager.push(integrationBranch);
+        if (pushOutcome.kind === 'pushed') {
+            core.info(`PR #${pr.number} PASS${agentAttempt ? ' (agent-assisted)' : ''}`);
+            return {
+                result: { pr, status: 'PASS', ...(agentAttempt && { agentAttempt }) },
+                pushed: true,
+            };
+        }
+        // Push refused (workflow scope / branch protection / other). Roll the
+        // merge back so subsequent PRs see a clean integration branch tip,
+        // then record the rejection and let the loop continue. A previous
+        // version threw here and killed the whole run on the first refusal.
+        core.warning(`PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`);
+        await this.merger.dropLastMerge('skip', pr);
+        return {
+            result: this.toPrResult(pr, { kind: 'push-rejected', reason: pushOutcome.reason, message: pushOutcome.message }, agentAttempt),
+            pushed: false,
+        };
+    }
+    toPrResult(pr, outcome, agentAttempt) {
         switch (outcome.kind) {
             case 'pass':
-                return { pr, status: 'PASS' };
+                return { pr, status: 'PASS', ...(agentAttempt && { agentAttempt }) };
             case 'merge-conflict':
                 return {
                     pr,
                     status: 'FAIL',
                     failure: { kind: 'merge-conflict', files: outcome.files },
+                    ...(agentAttempt && { agentAttempt }),
                 };
             case 'push-rejected':
                 return {
@@ -32334,6 +32393,7 @@ class BatchOrchestrator {
                         reason: outcome.reason,
                         message: outcome.message,
                     },
+                    ...(agentAttempt && { agentAttempt }),
                 };
             case 'validation-failed':
                 return {
@@ -32348,6 +32408,7 @@ class BatchOrchestrator {
                         summary: outcome.explanation.summary,
                         details: outcome.explanation.body,
                     },
+                    ...(agentAttempt && { agentAttempt }),
                 };
         }
     }
@@ -32449,7 +32510,7 @@ class ReportBuilder {
             let category = '';
             let note = '';
             if (r.status === 'PASS') {
-                category = '—';
+                category = r.agentAttempt ? '🤖 agent-assisted' : '—';
             }
             else if (r.failure?.kind === 'merge-conflict') {
                 category = 'merge conflict';
@@ -32500,30 +32561,44 @@ class ReportBuilder {
     }
     failureEntry(r) {
         const head = `- [#${r.pr.number}](${r.pr.htmlUrl}) — ${r.pr.title}`;
+        const agentBlock = r.agentAttempt ? this.agentAttemptBlock(r.agentAttempt) : '';
         if (r.failure?.kind === 'merge-conflict') {
             const files = r.failure.files.map((f) => `    - \`${f}\``).join('\n');
-            return `${head}\n  Conflicting files:\n${files}`;
+            return `${head}\n  Conflicting files:\n${files}${agentBlock}`;
         }
         if (r.failure?.kind === 'validation-failed') {
             return [
                 head,
                 `  - **Cause:** ${r.failure.cause}`,
                 `  - **Exit code:** ${r.failure.exitCode}`,
+                agentBlock,
                 ``,
                 `  <details><summary>Validation output (tail)</summary>`,
                 ``,
-                // The cursor / static analyzer renders its own details block as part of
+                // The static/Claude analyzer renders its own details block as part of
                 // the body; we strip the outer summary line and re-wrap inside the per-
                 // category block to keep nesting predictable.
                 r.failure.details,
                 ``,
                 `  </details>`,
-            ].join('\n');
+            ].filter((l) => l !== undefined).join('\n');
         }
         if (r.failure?.kind === 'push-rejected') {
-            return `${head}\n  - **Push rejected:** ${r.failure.message}`;
+            return `${head}\n  - **Push rejected:** ${r.failure.message}${agentBlock}`;
         }
         return head;
+    }
+    agentAttemptBlock(attempt) {
+        return [
+            ``,
+            `  <details><summary>Agent attempt — ${attempt.commitSha.slice(0, 7)} — ${escapePipes(attempt.summary)}</summary>`,
+            ``,
+            '  ```',
+            attempt.outputTail || '(no output)',
+            '  ```',
+            ``,
+            `  </details>`,
+        ].join('\n');
     }
     finalSuiteSection(outcome) {
         if (!outcome)
@@ -32589,6 +32664,130 @@ function escapePipes(s) {
     return s.replace(/\|/g, '\\|').replace(/\n/g, ' ');
 }
 
+;// CONCATENATED MODULE: external "node:child_process"
+const external_node_child_process_namespaceObject = __WEBPACK_EXTERNAL_createRequire(import.meta.url)("node:child_process");
+;// CONCATENATED MODULE: ./src/resolve/claude-resolver.ts
+
+
+class NoopAgenticResolver {
+    async resolveConflict() {
+        return { kind: 'gave-up', reason: 'agentic-resolve disabled', outputTail: '' };
+    }
+    async resolveValidation() {
+        return { kind: 'gave-up', reason: 'agentic-resolve disabled', outputTail: '' };
+    }
+}
+function defaultSpawn(args, env, timeoutMs) {
+    return new Promise((resolve) => {
+        let output = '';
+        const child = (0,external_node_child_process_namespaceObject.spawn)('claude', args, { env, timeout: timeoutMs });
+        child.stdout.on('data', (d) => { output += d.toString(); });
+        child.stderr.on('data', (d) => { output += d.toString(); });
+        child.on('close', (code) => {
+            resolve({ output, timedOut: child.killed, exitCode: code ?? 1 });
+        });
+        child.on('error', (err) => {
+            output += `\n[spawn error: ${err.message}]`;
+            resolve({ output, timedOut: false, exitCode: 1 });
+        });
+    });
+}
+class ClaudeAgenticResolver {
+    apiKey;
+    git;
+    timeoutMs;
+    spawnFn;
+    constructor(apiKey, git, timeoutMs, spawnFn) {
+        this.apiKey = apiKey;
+        this.git = git;
+        this.timeoutMs = timeoutMs;
+        this.spawnFn = spawnFn ?? defaultSpawn;
+    }
+    async resolveConflict({ pr, conflictedFiles }) {
+        const prompt = [
+            `You are resolving a git merge conflict introduced by a Dependabot dependency update.`,
+            ``,
+            `PR: #${pr.number} — ${pr.title}`,
+            `URL: ${pr.htmlUrl}`,
+            ``,
+            `The merge is in progress with conflicts in:`,
+            conflictedFiles.map((f) => `  - ${f}`).join('\n'),
+            ``,
+            `Steps:`,
+            `1. Resolve all conflict markers, preferring the incoming Dependabot version for dependency lines.`,
+            `2. Stage resolved files with git add.`,
+            `3. Complete the merge commit with: git commit --no-edit`,
+            `4. Do NOT run the validation suite — the orchestrator handles that.`,
+        ].join('\n');
+        return this.runAgent(prompt, pr.number, 'conflict');
+    }
+    async resolveValidation({ pr, validation }) {
+        const prompt = [
+            `You are fixing a post-merge validation failure caused by a Dependabot dependency update.`,
+            ``,
+            `PR: #${pr.number} — ${pr.title}`,
+            `URL: ${pr.htmlUrl}`,
+            `Exit code: ${validation.exitCode}`,
+            ``,
+            `Stderr tail:`,
+            '```',
+            validation.stderrTail || '(empty)',
+            '```',
+            ``,
+            `Stdout tail:`,
+            '```',
+            validation.stdoutTail || '(empty)',
+            '```',
+            ``,
+            `Steps:`,
+            `1. Diagnose the root cause from the output above.`,
+            `2. Apply the minimal fix (update type signatures, snapshots, peer deps, imports, etc.).`,
+            `3. Commit your changes with a descriptive message.`,
+            `4. Do NOT re-run the validation suite — the orchestrator will do that.`,
+            ``,
+            `If you cannot confidently fix the issue, exit without committing anything.`,
+        ].join('\n');
+        return this.runAgent(prompt, pr.number, 'validation');
+    }
+    async runAgent(prompt, prNumber, kind) {
+        const preSha = await this.currentSha();
+        core.info(`PR #${prNumber}: invoking Claude agent for ${kind} fix (pre: ${preSha.slice(0, 7)})`);
+        const env = { ...process.env, ANTHROPIC_API_KEY: this.apiKey };
+        const { output, timedOut, exitCode } = await this.spawnFn(['-p', prompt, '--dangerously-skip-permissions'], env, this.timeoutMs);
+        const outputTail = tail(output);
+        if (timedOut) {
+            core.warning(`PR #${prNumber}: agent timed out after ${this.timeoutMs}ms`);
+            return { kind: 'gave-up', reason: `timed out after ${this.timeoutMs}ms`, outputTail };
+        }
+        const postSha = await this.currentSha();
+        if (postSha === preSha) {
+            const reason = exitCode === 0 ? 'agent made no commits' : `agent exited ${exitCode} without committing`;
+            core.warning(`PR #${prNumber}: ${reason}`);
+            return { kind: 'gave-up', reason, outputTail };
+        }
+        core.info(`PR #${prNumber}: agent committed fix at ${postSha.slice(0, 7)}`);
+        return {
+            kind: 'resolved',
+            commitSha: postSha,
+            summary: claude_resolver_firstLine(output) || `Agent ${kind} fix`,
+            outputTail,
+        };
+    }
+    async currentSha() {
+        const result = await this.git.run(['rev-parse', 'HEAD']);
+        return result.stdout.trim();
+    }
+}
+function tail(text, bytes = 4000) {
+    if (text.length <= bytes)
+        return text;
+    return `…(truncated)…\n${text.slice(-bytes)}`;
+}
+function claude_resolver_firstLine(text) {
+    const idx = text.indexOf('\n');
+    return idx === -1 ? text.trim() : text.slice(0, idx).trim();
+}
+
 ;// CONCATENATED MODULE: ./src/validation/command-runner.ts
 
 const TAIL_BYTES = 8000;
@@ -32614,12 +32813,12 @@ class CommandValidationRunner {
         return {
             passed: exitCode === 0,
             exitCode,
-            stdoutTail: tail(stdout, TAIL_BYTES),
-            stderrTail: tail(stderr, TAIL_BYTES),
+            stdoutTail: command_runner_tail(stdout, TAIL_BYTES),
+            stderrTail: command_runner_tail(stderr, TAIL_BYTES),
         };
     }
 }
-function tail(text, bytes) {
+function command_runner_tail(text, bytes) {
     if (text.length <= bytes)
         return text;
     return `…(truncated)…\n${text.slice(-bytes)}`;
@@ -32637,27 +32836,37 @@ function tail(text, bytes) {
 
 
 
+
 const GIT_BOT_NAME = 'dependabot-batch-merge[bot]';
 const GIT_BOT_EMAIL = 'dependabot-batch-merge@users.noreply.github.com';
 async function executeBatch(options) {
-    const { config, token, cursorApiKey } = options;
+    const { config, token, anthropicApiKey } = options;
+    if (config.agenticResolve && !anthropicApiKey) {
+        throw new Error('agentic-resolve requires anthropic-api-key');
+    }
     const gitRunner = new GitRunner();
     await gitRunner.configureIdentity(GIT_BOT_NAME, GIT_BOT_EMAIL);
     const gh = new GitHubClient(token, config.owner, config.repo);
     const branchManager = new BranchManager(gitRunner);
     const merger = new PRMerger(gitRunner);
     const validator = new CommandValidationRunner(config.validationCommand);
-    const analyzer = buildAnalyzer(cursorApiKey);
+    const analyzer = buildAnalyzer(anthropicApiKey);
     const reporter = new ReportBuilder();
     const prLister = new DependabotPRLister(gh);
     const prWriter = new BatchPRWriter(gh);
-    const orchestrator = new BatchOrchestrator(prLister, branchManager, merger, validator, analyzer, reporter, prWriter);
+    const resolver = buildResolver(anthropicApiKey, gitRunner, config);
+    const orchestrator = new BatchOrchestrator(prLister, branchManager, merger, validator, analyzer, reporter, prWriter, resolver);
     return orchestrator.run(config);
 }
-function buildAnalyzer(cursorApiKey) {
-    if (!cursorApiKey)
+function buildAnalyzer(anthropicApiKey) {
+    if (!anthropicApiKey)
         return new StaticFailureAnalyzer();
-    return new CursorFailureAnalyzer({ apiKey: cursorApiKey });
+    return new ClaudeFailureAnalyzer({ apiKey: anthropicApiKey });
+}
+function buildResolver(anthropicApiKey, gitRunner, config) {
+    if (!config.agenticResolve || !anthropicApiKey)
+        return new NoopAgenticResolver();
+    return new ClaudeAgenticResolver(anthropicApiKey, gitRunner, config.agentTimeoutSeconds * 1000);
 }
 
 ;// CONCATENATED MODULE: ./src/config.ts
@@ -32677,6 +32886,8 @@ function parseConfig() {
         reRunFinalSuite: parseBool(core.getInput('re-run-final-suite'), true),
         draftPr: parseBool(core.getInput('draft-pr'), true),
         maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
+        agenticResolve: parseBool(core.getInput('agentic-resolve'), false),
+        agentTimeoutSeconds: parsePositiveInt(core.getInput('agent-timeout-seconds') || '600', 'agent-timeout-seconds'),
     };
 }
 function parseFailureHandling(raw) {
@@ -32709,8 +32920,8 @@ function parsePositiveInt(raw, name) {
 async function main() {
     const config = parseConfig();
     const token = core.getInput('github-token', { required: true });
-    const cursorApiKey = core.getInput('cursor-api-key') || undefined;
-    const summary = await executeBatch({ config, token, cursorApiKey });
+    const anthropicApiKey = core.getInput('anthropic-api-key') || undefined;
+    const summary = await executeBatch({ config, token, anthropicApiKey });
     core.setOutput('batch-pr-number', summary.batchPrNumber ?? '');
     core.setOutput('batch-pr-url', summary.batchPrUrl ?? '');
     core.setOutput('pass-count', summary.results.filter((r) => r.status === 'PASS').length);
