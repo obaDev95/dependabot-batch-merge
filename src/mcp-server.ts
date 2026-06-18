@@ -130,9 +130,10 @@ server.registerTool(
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  console.error('[dependabot-batch-merge] MCP server connected and listening');
 }
 
 main().catch((err) => {
-  console.error(err);
+  console.error('[dependabot-batch-merge] Fatal error:', err);
   process.exit(1);
 });
