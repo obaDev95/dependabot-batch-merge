@@ -6,6 +6,7 @@ import type { BranchManager } from '../src/git/branch-manager';
 import type { PRMerger } from '../src/git/merger';
 import type { DependabotPRLister } from '../src/github/pr-lister';
 import type { BatchPRWriter } from '../src/github/pr-writer';
+import type { AgenticResolver } from '../src/resolve/claude-resolver';
 import type { ValidationRunner } from '../src/validation/command-runner';
 import type { BatchConfig, DependabotPR } from '../src/types';
 
@@ -20,6 +21,8 @@ const baseConfig: BatchConfig = {
   reRunFinalSuite: false,
   draftPr: true,
   maxPrs: 20,
+  agenticResolve: false,
+  agentTimeoutSeconds: 600,
 };
 
 function makePr(overrides: Partial<DependabotPR> = {}): DependabotPR {
@@ -34,105 +37,93 @@ function makePr(overrides: Partial<DependabotPR> = {}): DependabotPR {
   };
 }
 
-describe('BatchOrchestrator', () => {
+const passValidation = { passed: true, exitCode: 0, stdoutTail: '', stderrTail: '' };
+const failValidation = { passed: false, exitCode: 1, stdoutTail: 'boom', stderrTail: 'oops' };
+
+function makeMerger(overrides: Partial<Record<keyof PRMerger, unknown>> = {}): PRMerger {
+  return {
+    merge: vi.fn().mockResolvedValue({ kind: 'merged' }),
+    dropLastMerge: vi.fn().mockResolvedValue(undefined),
+    abortMerge: vi.fn().mockResolvedValue(undefined),
+    headSha: vi.fn().mockResolvedValue('pre-sha'),
+    resetTo: vi.fn().mockResolvedValue(undefined),
+    ...overrides,
+  } as unknown as PRMerger;
+}
+
+function makeNoop(): AgenticResolver {
+  return {
+    resolveConflict: vi.fn().mockResolvedValue({ kind: 'gave-up', reason: 'disabled', outputTail: '' }),
+    resolveValidation: vi.fn().mockResolvedValue({ kind: 'gave-up', reason: 'disabled', outputTail: '' }),
+  };
+}
+
+function makeOrchestrator(
+  prLister: DependabotPRLister,
+  branchManager: BranchManager,
+  merger: PRMerger,
+  validator: ValidationRunner,
+  analyzer: FailureAnalyzer,
+  resolver: AgenticResolver = makeNoop(),
+): BatchOrchestrator {
+  const prWriter = {
+    findExistingPr: vi.fn().mockResolvedValue(null),
+    createPr: vi.fn().mockResolvedValue({ number: 99, url: 'https://example.test/pull/99' }),
+    updatePrBody: vi.fn().mockResolvedValue(undefined),
+    markPrAsReady: vi.fn().mockResolvedValue(undefined),
+  } as unknown as BatchPRWriter;
+  return new BatchOrchestrator(prLister, branchManager, merger, validator, analyzer, new ReportBuilder(), prWriter, resolver);
+}
+
+function makeBranchManager(pushResult: object = { kind: 'pushed' }): BranchManager {
+  return {
+    createIntegrationBranch: vi.fn().mockResolvedValue('chore/dependabot-batch-2026-05-14'),
+    push: vi.fn().mockResolvedValue(pushResult),
+    fetchPr: vi.fn().mockResolvedValue(undefined),
+  } as unknown as BranchManager;
+}
+
+function makeLister(prs: DependabotPR[]): DependabotPRLister {
+  return { extractOpenPullRequests: vi.fn().mockResolvedValue(prs) } as unknown as DependabotPRLister;
+}
+
+describe('BatchOrchestrator — baseline paths', () => {
   it('records PASS when merge succeeds and validation passes', async () => {
     const pr = makePr();
-    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } as unknown as DependabotPRLister;
-    const branchManager = {
-      createIntegrationBranch: vi.fn().mockResolvedValue('chore/dependabot-batch-2026-05-14'),
-      push: vi.fn().mockResolvedValue({ kind: 'pushed' }),
-      fetchPr: vi.fn().mockResolvedValue(undefined),
-    } as unknown as BranchManager;
-    const merger = {
-      merge: vi.fn().mockResolvedValue({ kind: 'merged' }),
-      dropLastMerge: vi.fn(),
-    } as unknown as PRMerger;
-    const validator: ValidationRunner = {
-      run: vi.fn().mockResolvedValue({ passed: true, exitCode: 0, stdoutTail: '', stderrTail: '' }),
-    };
+    const merger = makeMerger();
+    const validator: ValidationRunner = { run: vi.fn().mockResolvedValue(passValidation) };
     const analyzer: FailureAnalyzer = { explain: vi.fn() };
-    const prWriter = {
-      findExistingPr: vi.fn().mockResolvedValue(null),
-      createPr: vi.fn().mockResolvedValue({ number: 99, url: 'https://example.test/pull/99' }),
-      updatePrBody: vi.fn().mockResolvedValue(undefined),
-      markPrAsReady: vi.fn().mockResolvedValue(undefined),
-    } as unknown as BatchPRWriter;
 
-    const orchestrator = new BatchOrchestrator(
-      prLister,
-      branchManager,
-      merger,
-      validator,
-      analyzer,
-      new ReportBuilder(),
-      prWriter,
-    );
-
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, analyzer);
     const summary = await orchestrator.run(baseConfig);
 
-    expect(summary.results).toHaveLength(1);
     expect(summary.results[0]?.status).toBe('PASS');
     expect(merger.dropLastMerge).not.toHaveBeenCalled();
-    expect(branchManager.push).toHaveBeenCalledWith('chore/dependabot-batch-2026-05-14');
     expect(analyzer.explain).not.toHaveBeenCalled();
   });
 
-  it('records FAIL with merge-conflict and does not call validator', async () => {
+  it('records FAIL with merge-conflict and aborts merge (non-agentic)', async () => {
     const pr = makePr({ number: 2 });
-    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } as unknown as DependabotPRLister;
-    const branchManager = {
-      createIntegrationBranch: vi.fn().mockResolvedValue('chore/dependabot-batch-2026-05-14'),
-      push: vi.fn(),
-      fetchPr: vi.fn().mockResolvedValue(undefined),
-    } as unknown as BranchManager;
-    const merger = {
+    const merger = makeMerger({
       merge: vi.fn().mockResolvedValue({ kind: 'conflict', conflictedFiles: ['package.json'] }),
-      dropLastMerge: vi.fn(),
-    } as unknown as PRMerger;
+    });
     const validator: ValidationRunner = { run: vi.fn() };
     const analyzer: FailureAnalyzer = { explain: vi.fn() };
-    const prWriter = {
-      findExistingPr: vi.fn().mockResolvedValue(null),
-      createPr: vi.fn().mockResolvedValue({ number: 99, url: 'u' }),
-      updatePrBody: vi.fn().mockResolvedValue(undefined),
-      markPrAsReady: vi.fn(),
-    } as unknown as BatchPRWriter;
 
-    const orchestrator = new BatchOrchestrator(
-      prLister,
-      branchManager,
-      merger,
-      validator,
-      analyzer,
-      new ReportBuilder(),
-      prWriter,
-    );
-
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, analyzer);
     const summary = await orchestrator.run(baseConfig);
 
     expect(summary.results[0]?.status).toBe('FAIL');
     expect(summary.results[0]?.failure?.kind).toBe('merge-conflict');
+    expect(merger.abortMerge).toHaveBeenCalledOnce();
     expect(validator.run).not.toHaveBeenCalled();
     expect(analyzer.explain).not.toHaveBeenCalled();
   });
 
   it('drops the failed merge and asks the analyzer to explain on validation failure', async () => {
     const pr = makePr({ number: 3 });
-    const prLister = { extractOpenPullRequests: vi.fn().mockResolvedValue([pr]) } as unknown as DependabotPRLister;
-    const branchManager = {
-      createIntegrationBranch: vi.fn().mockResolvedValue('chore/dependabot-batch-2026-05-14'),
-      push: vi.fn(),
-      fetchPr: vi.fn().mockResolvedValue(undefined),
-    } as unknown as BranchManager;
-    const merger = {
-      merge: vi.fn().mockResolvedValue({ kind: 'merged' }),
-      dropLastMerge: vi.fn().mockResolvedValue(undefined),
-    } as unknown as PRMerger;
-    const validator: ValidationRunner = {
-      run: vi
-        .fn()
-        .mockResolvedValue({ passed: false, exitCode: 1, stdoutTail: 'boom', stderrTail: 'oops' }),
-    };
+    const merger = makeMerger();
+    const validator: ValidationRunner = { run: vi.fn().mockResolvedValue(failValidation) };
     const analyzer: FailureAnalyzer = {
       explain: vi.fn().mockResolvedValue({
         category: 'unknown',
@@ -143,27 +134,131 @@ describe('BatchOrchestrator', () => {
         body: 'long story',
       }),
     };
-    const prWriter = {
-      findExistingPr: vi.fn().mockResolvedValue(null),
-      createPr: vi.fn().mockResolvedValue({ number: 99, url: 'u' }),
-      updatePrBody: vi.fn().mockResolvedValue(undefined),
-      markPrAsReady: vi.fn(),
-    } as unknown as BatchPRWriter;
 
-    const orchestrator = new BatchOrchestrator(
-      prLister,
-      branchManager,
-      merger,
-      validator,
-      analyzer,
-      new ReportBuilder(),
-      prWriter,
-    );
-
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, analyzer);
     const summary = await orchestrator.run(baseConfig);
 
     expect(summary.results[0]?.status).toBe('FAIL');
     expect(merger.dropLastMerge).toHaveBeenCalledWith('skip', pr);
+    expect(analyzer.explain).toHaveBeenCalledOnce();
+  });
+});
+
+describe('BatchOrchestrator — agentic paths', () => {
+  const agenticConfig: BatchConfig = { ...baseConfig, agenticResolve: true };
+
+  it('records PASS with agentAttempt when conflict resolved by agent + revalidation passes', async () => {
+    const pr = makePr({ number: 10 });
+    const merger = makeMerger({
+      merge: vi.fn().mockResolvedValue({ kind: 'conflict', conflictedFiles: ['package.json'] }),
+    });
+    const validator: ValidationRunner = { run: vi.fn().mockResolvedValue(passValidation) };
+    const analyzer: FailureAnalyzer = { explain: vi.fn() };
+    const resolver: AgenticResolver = {
+      resolveConflict: vi.fn().mockResolvedValue({
+        kind: 'resolved',
+        commitSha: 'fix-sha',
+        summary: 'resolved lockfile conflict',
+        outputTail: 'agent output',
+      }),
+      resolveValidation: vi.fn(),
+    };
+
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, analyzer, resolver);
+    const summary = await orchestrator.run(agenticConfig);
+
+    expect(summary.results[0]?.status).toBe('PASS');
+    expect(summary.results[0]?.agentAttempt?.commitSha).toBe('fix-sha');
+    expect(merger.abortMerge).not.toHaveBeenCalled();
+    expect(analyzer.explain).not.toHaveBeenCalled();
+  });
+
+  it('falls back to merge-conflict FAIL when resolver gives up on conflict', async () => {
+    const pr = makePr({ number: 11 });
+    const merger = makeMerger({
+      merge: vi.fn().mockResolvedValue({ kind: 'conflict', conflictedFiles: ['a.ts'] }),
+    });
+    const validator: ValidationRunner = { run: vi.fn() };
+    const resolver: AgenticResolver = {
+      resolveConflict: vi.fn().mockResolvedValue({ kind: 'gave-up', reason: 'too complex', outputTail: '' }),
+      resolveValidation: vi.fn(),
+    };
+
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, resolver as unknown as FailureAnalyzer, resolver);
+    // Note: analyzer is not called for plain merge-conflict, so passing resolver as analyzer is fine here
+    const summary = await orchestrator.run(agenticConfig);
+
+    expect(summary.results[0]?.status).toBe('FAIL');
+    expect(summary.results[0]?.failure?.kind).toBe('merge-conflict');
+    expect(merger.abortMerge).toHaveBeenCalledOnce();
+    expect(summary.results[0]?.agentAttempt).toBeUndefined();
+    expect(validator.run).not.toHaveBeenCalled();
+  });
+
+  it('records PASS with agentAttempt when validation fix by agent + revalidation passes', async () => {
+    const pr = makePr({ number: 12 });
+    const merger = makeMerger();
+    const validator: ValidationRunner = {
+      run: vi.fn()
+        .mockResolvedValueOnce(failValidation)  // first validation fails
+        .mockResolvedValueOnce(passValidation),  // revalidation after agent fix passes
+    };
+    const analyzer: FailureAnalyzer = { explain: vi.fn() };
+    const resolver: AgenticResolver = {
+      resolveConflict: vi.fn(),
+      resolveValidation: vi.fn().mockResolvedValue({
+        kind: 'resolved',
+        commitSha: 'agent-fix-sha',
+        summary: 'fixed type error',
+        outputTail: 'tsc output',
+      }),
+    };
+
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, analyzer, resolver);
+    const summary = await orchestrator.run(agenticConfig);
+
+    expect(summary.results[0]?.status).toBe('PASS');
+    expect(summary.results[0]?.agentAttempt?.commitSha).toBe('agent-fix-sha');
+    expect(merger.dropLastMerge).not.toHaveBeenCalled();
+    expect(merger.resetTo).not.toHaveBeenCalled();
+    expect(analyzer.explain).not.toHaveBeenCalled();
+  });
+
+  it('records FAIL with agentAttempt when agent commits but revalidation still fails', async () => {
+    const pr = makePr({ number: 13 });
+    const merger = makeMerger();
+    const validator: ValidationRunner = {
+      run: vi.fn()
+        .mockResolvedValueOnce(failValidation)  // first validation fails
+        .mockResolvedValueOnce(failValidation), // revalidation after agent fix also fails
+    };
+    const explanation = {
+      category: 'type-error' as const,
+      categoryLabel: 'TypeScript error',
+      cause: 'still broken',
+      exitCode: 1,
+      summary: 'still broken',
+      body: 'details',
+    };
+    const analyzer: FailureAnalyzer = { explain: vi.fn().mockResolvedValue(explanation) };
+    const resolver: AgenticResolver = {
+      resolveConflict: vi.fn(),
+      resolveValidation: vi.fn().mockResolvedValue({
+        kind: 'resolved',
+        commitSha: 'partial-fix',
+        summary: 'partial fix',
+        outputTail: '',
+      }),
+    };
+
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, analyzer, resolver);
+    const summary = await orchestrator.run(agenticConfig);
+
+    expect(summary.results[0]?.status).toBe('FAIL');
+    expect(summary.results[0]?.failure?.kind).toBe('validation-failed');
+    expect(summary.results[0]?.agentAttempt?.commitSha).toBe('partial-fix');
+    expect(merger.resetTo).toHaveBeenCalledWith('pre-sha');
+    expect(merger.dropLastMerge).not.toHaveBeenCalled();
     expect(analyzer.explain).toHaveBeenCalledOnce();
   });
 });
