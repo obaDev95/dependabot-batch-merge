@@ -1,5 +1,5 @@
 import type { FailureCategory } from '../analysis/categorize';
-import type { PRResult, ValidationOutcome } from '../types';
+import type { AgentAttempt, PRResult, ValidationOutcome } from '../types';
 
 const PASSED_PRS_BLOCK_START = '<!-- dependabot-batch-merge:passed-prs:start -->';
 const PASSED_PRS_BLOCK_END = '<!-- dependabot-batch-merge:passed-prs:end -->';
@@ -110,7 +110,7 @@ export class ReportBuilder {
       let category = '';
       let note = '';
       if (r.status === 'PASS') {
-        category = '—';
+        category = r.agentAttempt ? '🤖 agent-assisted' : '—';
       } else if (r.failure?.kind === 'merge-conflict') {
         category = 'merge conflict';
         note = `${r.failure.files.length} file(s) conflicted`;
@@ -161,30 +161,45 @@ export class ReportBuilder {
 
   private failureEntry(r: PRResult): string {
     const head = `- [#${r.pr.number}](${r.pr.htmlUrl}) — ${r.pr.title}`;
+    const agentBlock = r.agentAttempt ? this.agentAttemptBlock(r.agentAttempt) : '';
     if (r.failure?.kind === 'merge-conflict') {
       const files = r.failure.files.map((f) => `    - \`${f}\``).join('\n');
-      return `${head}\n  Conflicting files:\n${files}`;
+      return `${head}\n  Conflicting files:\n${files}${agentBlock}`;
     }
     if (r.failure?.kind === 'validation-failed') {
       return [
         head,
         `  - **Cause:** ${r.failure.cause}`,
         `  - **Exit code:** ${r.failure.exitCode}`,
+        agentBlock,
         ``,
         `  <details><summary>Validation output (tail)</summary>`,
         ``,
-        // The cursor / static analyzer renders its own details block as part of
+        // The static/Claude analyzer renders its own details block as part of
         // the body; we strip the outer summary line and re-wrap inside the per-
         // category block to keep nesting predictable.
         r.failure.details,
         ``,
         `  </details>`,
-      ].join('\n');
+      ].filter((l) => l !== undefined).join('\n');
     }
     if (r.failure?.kind === 'push-rejected') {
-      return `${head}\n  - **Push rejected:** ${r.failure.message}`;
+      return `${head}\n  - **Push rejected:** ${r.failure.message}${agentBlock}`;
     }
     return head;
+  }
+
+  private agentAttemptBlock(attempt: AgentAttempt): string {
+    return [
+      ``,
+      `  <details><summary>Agent attempt — ${attempt.commitSha.slice(0, 7)} — ${escapePipes(attempt.summary)}</summary>`,
+      ``,
+      '  ```',
+      attempt.outputTail || '(no output)',
+      '  ```',
+      ``,
+      `  </details>`,
+    ].join('\n');
   }
 
   private finalSuiteSection(outcome: ValidationOutcome | undefined): string {

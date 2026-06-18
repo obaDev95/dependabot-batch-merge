@@ -83,4 +83,48 @@ describe('ReportBuilder', () => {
     expect(body).toContain('## Final suite re-run');
     expect(body).toContain('final fail');
   });
+
+  it('renders agent attempt block in failure entry when agentAttempt is set', () => {
+    const results = [
+      {
+        pr: makePr(5),
+        status: 'FAIL' as const,
+        failure: {
+          kind: 'validation-failed' as const,
+          category: 'type-error' as const,
+          categoryLabel: 'TypeScript error',
+          cause: 'type mismatch',
+          exitCode: 1,
+          summary: 'type mismatch',
+          details: 'details here',
+        },
+        agentAttempt: {
+          commitSha: 'abc1234',
+          summary: 'fixed type in Foo component',
+          outputTail: 'tsc output tail',
+        },
+      },
+    ];
+
+    const body = builder.build({ integrationBranch: 'b', baseBranch: 'main', results });
+
+    expect(body).toContain('Agent attempt');
+    expect(body).toContain('abc1234');
+    expect(body).toContain('fixed type in Foo component');
+    expect(body).toContain('tsc output tail');
+  });
+
+  it('marks agent-assisted PASS in summary table', () => {
+    const results = [
+      {
+        pr: makePr(7),
+        status: 'PASS' as const,
+        agentAttempt: { commitSha: 'fix1', summary: 'agent helped', outputTail: '' },
+      },
+    ];
+
+    const body = builder.build({ integrationBranch: 'b', baseBranch: 'main', results });
+
+    expect(body).toContain('agent-assisted');
+  });
 });
