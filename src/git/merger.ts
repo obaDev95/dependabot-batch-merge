@@ -15,8 +15,21 @@ export class PRMerger {
     }
 
     const conflictedFiles = await this.detectConflicts();
-    await this.git.run(['merge', '--abort'], { ignoreReturnCode: true });
+    // ponytail: caller decides abort vs. agent resolution — don't abort here
     return { kind: 'conflict', conflictedFiles };
+  }
+
+  async abortMerge(): Promise<void> {
+    await this.git.run(['merge', '--abort'], { ignoreReturnCode: true });
+  }
+
+  async headSha(): Promise<string> {
+    const result = await this.git.run(['rev-parse', 'HEAD']);
+    return result.stdout.trim();
+  }
+
+  async resetTo(sha: string): Promise<void> {
+    await this.git.run(['reset', '--hard', sha]);
   }
 
   async dropLastMerge(mode: FailureHandling, pr: DependabotPR): Promise<void> {

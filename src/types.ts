@@ -11,6 +11,15 @@ export interface BatchConfig {
   maxPrs: number;
   owner: string;
   repo: string;
+  agenticResolve: boolean;
+  agentTimeoutSeconds: number;
+}
+
+/** Metadata for a Claude agent attempt on a PR. Only present when the agent committed something. */
+export interface AgentAttempt {
+  commitSha: string;
+  summary: string;
+  outputTail: string;
 }
 
 export interface DependabotPR {
@@ -47,6 +56,7 @@ export interface PRResult {
   pr: DependabotPR;
   status: PRStatus;
   failure?: FailureReason;
+  agentAttempt?: AgentAttempt;
 }
 
 export interface ValidationOutcome {

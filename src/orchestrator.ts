@@ -5,7 +5,9 @@ import type { PRMerger } from './git/merger';
 import type { DependabotPRLister } from './github/pr-lister';
 import type { BatchPRRef, BatchPRWriter } from './github/pr-writer';
 import type { ReportBuilder } from './report/builder';
+import type { AgenticResolver } from './resolve/claude-resolver';
 import type {
+  AgentAttempt,
   BatchConfig,
   BatchSummary,
   DependabotPR,
@@ -39,6 +41,7 @@ export class BatchOrchestrator {
     private readonly analyzer: FailureAnalyzer,
     private readonly reporter: ReportBuilder,
     private readonly prWriter: BatchPRWriter,
+    private readonly resolver: AgenticResolver,
   ) {}
 
   async run(config: BatchConfig): Promise<BatchSummary> {
@@ -145,16 +148,17 @@ export class BatchOrchestrator {
   ): Promise<{ result: PRResult; pushed: boolean }> {
     await this.branchManager.fetchPr(pr.headRef);
 
+    const preMergeSha = await this.merger.headSha();
     const mergeOutcome = await this.attemptMerge(pr);
+
     if (mergeOutcome.kind === 'conflict') {
-      core.warning(`Merge conflict for PR #${pr.number}`);
-      return {
-        result: this.toPrResult(pr, {
-          kind: 'merge-conflict',
-          files: mergeOutcome.conflictedFiles ?? [],
-        }),
-        pushed: false,
-      };
+      return this.handleMergeConflict(
+        pr,
+        config,
+        integrationBranch,
+        mergeOutcome.conflictedFiles ?? [],
+        preMergeSha,
+      );
     }
 
     const validation = await this.validator.run();
@@ -162,38 +166,43 @@ export class BatchOrchestrator {
       return this.validateAndPush(pr, integrationBranch, validation);
     }
 
-    return this.handleValidationFailure(pr, config, integrationBranch, validation);
+    return this.handleValidationFailure(pr, config, integrationBranch, validation, preMergeSha);
   }
 
-  private async attemptMerge(pr: DependabotPR): Promise<MergeOutcome> {
-    return this.merger.merge(pr);
-  }
-
-  private async validateAndPush(
+  private async handleMergeConflict(
     pr: DependabotPR,
+    config: BatchConfig,
     integrationBranch: string,
-    _validation: ValidationOutcome,
+    conflictedFiles: string[],
+    preMergeSha: string,
   ): Promise<{ result: PRResult; pushed: boolean }> {
-    const pushOutcome = await this.branchManager.push(integrationBranch);
-    if (pushOutcome.kind === 'pushed') {
-      core.info(`PR #${pr.number} PASS`);
-      return { result: this.toPrResult(pr, { kind: 'pass', pushed: true }), pushed: true };
+    if (config.agenticResolve) {
+      const resolution = await this.resolver.resolveConflict({ pr, conflictedFiles });
+      if (resolution.kind === 'resolved') {
+        const agentAttempt: AgentAttempt = {
+          commitSha: resolution.commitSha,
+          summary: resolution.summary,
+          outputTail: resolution.outputTail,
+        };
+        const validation = await this.validator.run();
+        if (validation.passed) {
+          return this.validateAndPush(pr, integrationBranch, validation, agentAttempt);
+        }
+        core.warning(`PR #${pr.number}: agent conflict fix did not pass validation, resetting`);
+        await this.merger.resetTo(preMergeSha);
+        const explanation = await this.analyzer.explain({ pr, validation });
+        return {
+          result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed: false }, agentAttempt),
+          pushed: false,
+        };
+      }
+      core.warning(`PR #${pr.number}: agent gave up on conflict: ${resolution.reason}`);
     }
 
-    // Push refused (workflow scope / branch protection / other). Roll the
-    // merge back so subsequent PRs see a clean integration branch tip,
-    // then record the rejection and let the loop continue. A previous
-    // version threw here and killed the whole run on the first refusal.
-    core.warning(
-      `PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`,
-    );
-    await this.merger.dropLastMerge('skip', pr);
+    await this.merger.abortMerge();
+    core.warning(`Merge conflict for PR #${pr.number}`);
     return {
-      result: this.toPrResult(pr, {
-        kind: 'push-rejected',
-        reason: pushOutcome.reason,
-        message: pushOutcome.message,
-      }),
+      result: this.toPrResult(pr, { kind: 'merge-conflict', files: conflictedFiles }),
       pushed: false,
     };
   }
@@ -203,8 +212,34 @@ export class BatchOrchestrator {
     config: BatchConfig,
     integrationBranch: string,
     validation: ValidationOutcome,
+    preMergeSha: string,
   ): Promise<{ result: PRResult; pushed: boolean }> {
     core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
+
+    if (config.agenticResolve) {
+      const resolution = await this.resolver.resolveValidation({ pr, validation });
+      if (resolution.kind === 'resolved') {
+        const agentAttempt: AgentAttempt = {
+          commitSha: resolution.commitSha,
+          summary: resolution.summary,
+          outputTail: resolution.outputTail,
+        };
+        const revalidation = await this.validator.run();
+        if (revalidation.passed) {
+          return this.validateAndPush(pr, integrationBranch, revalidation, agentAttempt);
+        }
+        core.warning(`PR #${pr.number}: agent validation fix did not pass revalidation, resetting`);
+        await this.merger.resetTo(preMergeSha);
+        const explanation = await this.analyzer.explain({ pr, validation: revalidation });
+        core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
+        return {
+          result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed: false }, agentAttempt),
+          pushed: false,
+        };
+      }
+      core.warning(`PR #${pr.number}: agent gave up on validation fix: ${resolution.reason}`);
+    }
+
     const explanation = await this.analyzer.explain({ pr, validation });
     core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
     await this.merger.dropLastMerge(config.onFailure, pr);
@@ -225,15 +260,53 @@ export class BatchOrchestrator {
     };
   }
 
-  private toPrResult(pr: DependabotPR, outcome: ProcessStepOutcome): PRResult {
+  private async attemptMerge(pr: DependabotPR): Promise<MergeOutcome> {
+    return this.merger.merge(pr);
+  }
+
+  private async validateAndPush(
+    pr: DependabotPR,
+    integrationBranch: string,
+    _validation: ValidationOutcome,
+    agentAttempt?: AgentAttempt,
+  ): Promise<{ result: PRResult; pushed: boolean }> {
+    const pushOutcome = await this.branchManager.push(integrationBranch);
+    if (pushOutcome.kind === 'pushed') {
+      core.info(`PR #${pr.number} PASS${agentAttempt ? ' (agent-assisted)' : ''}`);
+      return {
+        result: { pr, status: 'PASS', ...(agentAttempt && { agentAttempt }) },
+        pushed: true,
+      };
+    }
+
+    // Push refused (workflow scope / branch protection / other). Roll the
+    // merge back so subsequent PRs see a clean integration branch tip,
+    // then record the rejection and let the loop continue. A previous
+    // version threw here and killed the whole run on the first refusal.
+    core.warning(
+      `PR #${pr.number} push rejected (${pushOutcome.reason}): ${pushOutcome.message}`,
+    );
+    await this.merger.dropLastMerge('skip', pr);
+    return {
+      result: this.toPrResult(
+        pr,
+        { kind: 'push-rejected', reason: pushOutcome.reason, message: pushOutcome.message },
+        agentAttempt,
+      ),
+      pushed: false,
+    };
+  }
+
+  private toPrResult(pr: DependabotPR, outcome: ProcessStepOutcome, agentAttempt?: AgentAttempt): PRResult {
     switch (outcome.kind) {
       case 'pass':
-        return { pr, status: 'PASS' };
+        return { pr, status: 'PASS', ...(agentAttempt && { agentAttempt }) };
       case 'merge-conflict':
         return {
           pr,
           status: 'FAIL',
           failure: { kind: 'merge-conflict', files: outcome.files },
+          ...(agentAttempt && { agentAttempt }),
         };
       case 'push-rejected':
         return {
@@ -244,6 +317,7 @@ export class BatchOrchestrator {
             reason: outcome.reason,
             message: outcome.message,
           },
+          ...(agentAttempt && { agentAttempt }),
         };
       case 'validation-failed':
         return {
@@ -258,6 +332,7 @@ export class BatchOrchestrator {
             summary: outcome.explanation.summary,
             details: outcome.explanation.body,
           },
+          ...(agentAttempt && { agentAttempt }),
         };
     }
   }
