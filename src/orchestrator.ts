@@ -228,13 +228,18 @@ export class BatchOrchestrator {
         if (revalidation.passed) {
           return this.validateAndPush(pr, integrationBranch, revalidation, agentAttempt);
         }
-        core.warning(`PR #${pr.number}: agent validation fix did not pass revalidation, resetting`);
-        await this.merger.resetTo(preMergeSha);
+        core.warning(`PR #${pr.number}: agent validation fix did not pass revalidation, discarding`);
+        if (config.onFailure === 'revert-commit') {
+          await this.merger.revertRange(preMergeSha, pr);
+        } else {
+          await this.merger.resetTo(preMergeSha);
+        }
         const explanation = await this.analyzer.explain({ pr, validation: revalidation });
         core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
+        const pushed = await this.pushIfRevertCommit(config, integrationBranch, pr);
         return {
-          result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed: false }, agentAttempt),
-          pushed: false,
+          result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed }, agentAttempt),
+          pushed,
         };
       }
       core.warning(`PR #${pr.number}: agent gave up on validation fix: ${resolution.reason}`);
@@ -243,21 +248,24 @@ export class BatchOrchestrator {
     const explanation = await this.analyzer.explain({ pr, validation });
     core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
     await this.merger.dropLastMerge(config.onFailure, pr);
-    let pushed = false;
-    if (config.onFailure === 'revert-commit') {
-      const revertPush = await this.branchManager.push(integrationBranch);
-      if (revertPush.kind === 'pushed') {
-        pushed = true;
-      } else {
-        core.warning(
-          `PR #${pr.number} revert push rejected (${revertPush.reason}): ${revertPush.message}`,
-        );
-      }
-    }
+    const pushed = await this.pushIfRevertCommit(config, integrationBranch, pr);
     return {
       result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed }),
       pushed,
     };
+  }
+
+  /** Pushes the revert commit just created by dropLastMerge/revertRange, if onFailure calls for one. */
+  private async pushIfRevertCommit(
+    config: BatchConfig,
+    integrationBranch: string,
+    pr: DependabotPR,
+  ): Promise<boolean> {
+    if (config.onFailure !== 'revert-commit') return false;
+    const revertPush = await this.branchManager.push(integrationBranch);
+    if (revertPush.kind === 'pushed') return true;
+    core.warning(`PR #${pr.number} revert push rejected (${revertPush.reason}): ${revertPush.message}`);
+    return false;
   }
 
   private async attemptMerge(pr: DependabotPR): Promise<MergeOutcome> {
