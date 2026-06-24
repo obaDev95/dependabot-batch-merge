@@ -20,6 +20,14 @@ export function parseConfig(): BatchConfig {
     maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
     agenticResolve: parseBool(core.getInput('agentic-resolve'), false),
     agentTimeoutSeconds: parsePositiveInt(core.getInput('agent-timeout-seconds') || '600', 'agent-timeout-seconds'),
+    maxAgentCallsPerBatch: parsePositiveInt(
+      core.getInput('max-agent-calls-per-batch') || '10',
+      'max-agent-calls-per-batch',
+    ),
+    maxBatchWallClockSeconds: parsePositiveInt(
+      core.getInput('max-batch-wall-clock-seconds') || '3600',
+      'max-batch-wall-clock-seconds',
+    ),
   };
 }
 
