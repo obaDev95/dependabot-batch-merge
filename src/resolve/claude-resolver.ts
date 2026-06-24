@@ -30,7 +30,10 @@ type SpawnFn = (
 function defaultSpawn(args: string[], env: NodeJS.ProcessEnv, timeoutMs: number): Promise<{ output: string; timedOut: boolean; exitCode: number }> {
   return new Promise((resolve) => {
     let output = '';
-    const child = spawn('claude', args, { env, timeout: timeoutMs });
+    // ponytail: explicit cwd so the agent sees the same working tree as the
+    // orchestrator's git ops. Inheriting silently works today but breaks the
+    // moment anyone introduces a chdir between MCP startup and resolver call.
+    const child = spawn('claude', args, { env, timeout: timeoutMs, cwd: process.cwd() });
     child.stdout.on('data', (d: Buffer) => { output += d.toString(); });
     child.stderr.on('data', (d: Buffer) => { output += d.toString(); });
     child.on('close', (code) => {

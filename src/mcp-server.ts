@@ -116,6 +116,19 @@ server.registerTool(
                 title: r.pr.title,
                 status: r.status,
                 failure: r.failure?.kind ?? null,
+                agent: r.agentAttempt
+                  ? {
+                      kind: 'resolved' as const,
+                      commitSha: r.agentAttempt.commitSha,
+                      summary: r.agentAttempt.summary,
+                    }
+                  : r.agentGaveUp
+                    ? {
+                        kind: 'gave-up' as const,
+                        stage: r.agentGaveUp.stage,
+                        reason: r.agentGaveUp.reason,
+                      }
+                    : { kind: 'none' as const },
               })),
             },
             null,

@@ -1,5 +1,5 @@
 import type { FailureCategory } from '../analysis/categorize';
-import type { AgentAttempt, PRResult, ValidationOutcome } from '../types';
+import type { AgentAttempt, AgentGaveUp, PRResult, ValidationOutcome } from '../types';
 
 const PASSED_PRS_BLOCK_START = '<!-- dependabot-batch-merge:passed-prs:start -->';
 const PASSED_PRS_BLOCK_END = '<!-- dependabot-batch-merge:passed-prs:end -->';
@@ -121,6 +121,9 @@ export class ReportBuilder {
         category = pushRejectLabel(r.failure.reason);
         note = r.failure.message;
       }
+      if (r.status === 'FAIL' && r.agentGaveUp) {
+        category = `🤖 gave up — ${category}`;
+      }
       return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(category)} | ${escapePipes(note)} |`;
     });
     return [header, ...rows].join('\n');
@@ -162,9 +165,10 @@ export class ReportBuilder {
   private failureEntry(r: PRResult): string {
     const head = `- [#${r.pr.number}](${r.pr.htmlUrl}) — ${r.pr.title}`;
     const agentBlock = r.agentAttempt ? this.agentAttemptBlock(r.agentAttempt) : '';
+    const gaveUpBlock = r.agentGaveUp ? this.agentGaveUpBlock(r.agentGaveUp) : '';
     if (r.failure?.kind === 'merge-conflict') {
       const files = r.failure.files.map((f) => `    - \`${f}\``).join('\n');
-      return `${head}\n  Conflicting files:\n${files}${agentBlock}`;
+      return `${head}\n  Conflicting files:\n${files}${agentBlock}${gaveUpBlock}`;
     }
     if (r.failure?.kind === 'validation-failed') {
       return [
@@ -172,6 +176,7 @@ export class ReportBuilder {
         `  - **Cause:** ${r.failure.cause}`,
         `  - **Exit code:** ${r.failure.exitCode}`,
         agentBlock,
+        gaveUpBlock,
         ``,
         `  <details><summary>Validation output (tail)</summary>`,
         ``,
@@ -184,7 +189,7 @@ export class ReportBuilder {
       ].filter((l) => l !== undefined).join('\n');
     }
     if (r.failure?.kind === 'push-rejected') {
-      return `${head}\n  - **Push rejected:** ${r.failure.message}${agentBlock}`;
+      return `${head}\n  - **Push rejected:** ${r.failure.message}${agentBlock}${gaveUpBlock}`;
     }
     return head;
   }
@@ -196,6 +201,19 @@ export class ReportBuilder {
       ``,
       '  ```',
       attempt.outputTail || '(no output)',
+      '  ```',
+      ``,
+      `  </details>`,
+    ].join('\n');
+  }
+
+  private agentGaveUpBlock(gaveUp: AgentGaveUp): string {
+    return [
+      ``,
+      `  <details><summary>Agent gave up — ${gaveUp.stage} — ${escapePipes(gaveUp.reason)}</summary>`,
+      ``,
+      '  ```',
+      gaveUp.outputTail || '(no output)',
       '  ```',
       ``,
       `  </details>`,

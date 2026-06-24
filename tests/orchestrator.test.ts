@@ -196,6 +196,74 @@ describe('BatchOrchestrator — agentic paths', () => {
     expect(validator.run).not.toHaveBeenCalled();
   });
 
+  it('populates agentGaveUp on PRResult when resolver gives up on conflict', async () => {
+    const pr = makePr({ number: 15 });
+    const merger = makeMerger({
+      merge: vi.fn().mockResolvedValue({ kind: 'conflict', conflictedFiles: ['package-lock.json'] }),
+    });
+    const validator: ValidationRunner = { run: vi.fn() };
+    const resolver: AgenticResolver = {
+      resolveConflict: vi.fn().mockResolvedValue({
+        kind: 'gave-up',
+        reason: 'agent made no commits',
+        outputTail: 'tool: Bash\nerror: merge conflict beyond auto-resolution',
+      }),
+      resolveValidation: vi.fn(),
+    };
+    const analyzer: FailureAnalyzer = { explain: vi.fn() };
+
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, analyzer, resolver);
+    const summary = await orchestrator.run(agenticConfig);
+
+    expect(summary.results[0]?.status).toBe('FAIL');
+    expect(summary.results[0]?.failure?.kind).toBe('merge-conflict');
+    expect(summary.results[0]?.agentAttempt).toBeUndefined();
+    expect(summary.results[0]?.agentGaveUp).toEqual({
+      stage: 'conflict',
+      reason: 'agent made no commits',
+      outputTail: 'tool: Bash\nerror: merge conflict beyond auto-resolution',
+    });
+    expect(merger.abortMerge).toHaveBeenCalledOnce();
+  });
+
+  it('populates agentGaveUp on PRResult when resolver gives up on validation', async () => {
+    const pr = makePr({ number: 16 });
+    const merger = makeMerger();
+    const validator: ValidationRunner = { run: vi.fn().mockResolvedValue(failValidation) };
+    const resolver: AgenticResolver = {
+      resolveConflict: vi.fn(),
+      resolveValidation: vi.fn().mockResolvedValue({
+        kind: 'gave-up',
+        reason: 'timed out after 600000ms',
+        outputTail: 'agent partial output before timeout',
+      }),
+    };
+    const analyzer: FailureAnalyzer = {
+      explain: vi.fn().mockResolvedValue({
+        category: 'type-error' as const,
+        categoryLabel: 'TypeScript error',
+        cause: 'tsc fail',
+        exitCode: 1,
+        summary: 'tsc fail',
+        body: 'details',
+      }),
+    };
+
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, analyzer, resolver);
+    const summary = await orchestrator.run(agenticConfig);
+
+    expect(summary.results[0]?.status).toBe('FAIL');
+    expect(summary.results[0]?.failure?.kind).toBe('validation-failed');
+    expect(summary.results[0]?.agentAttempt).toBeUndefined();
+    expect(summary.results[0]?.agentGaveUp).toEqual({
+      stage: 'validation',
+      reason: 'timed out after 600000ms',
+      outputTail: 'agent partial output before timeout',
+    });
+    expect(merger.dropLastMerge).toHaveBeenCalledWith('skip', pr);
+    expect(analyzer.explain).toHaveBeenCalledOnce();
+  });
+
   it('records PASS with agentAttempt when validation fix by agent + revalidation passes', async () => {
     const pr = makePr({ number: 12 });
     const merger = makeMerger();

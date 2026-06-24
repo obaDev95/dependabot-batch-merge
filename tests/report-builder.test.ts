@@ -127,4 +127,25 @@ describe('ReportBuilder', () => {
 
     expect(body).toContain('agent-assisted');
   });
+
+  it('renders agent gave-up block and summary marker when agentGaveUp is set on a FAIL', () => {
+    const results: PRResult[] = [
+      {
+        pr: makePr(8),
+        status: 'FAIL',
+        failure: { kind: 'merge-conflict', files: ['package-lock.json'] },
+        agentGaveUp: {
+          stage: 'conflict',
+          reason: 'agent made no commits',
+          outputTail: 'agent stdout tail snippet',
+        },
+      },
+    ];
+
+    const body = builder.build({ integrationBranch: 'b', baseBranch: 'main', results });
+
+    expect(body).toContain('🤖 gave up');
+    expect(body).toContain('Agent gave up — conflict — agent made no commits');
+    expect(body).toContain('agent stdout tail snippet');
+  });
 });
