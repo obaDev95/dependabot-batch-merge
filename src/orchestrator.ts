@@ -8,6 +8,7 @@ import type { ReportBuilder } from './report/builder';
 import type { AgenticResolver } from './resolve/claude-resolver';
 import type {
   AgentAttempt,
+  AgentGaveUp,
   BatchConfig,
   BatchSummary,
   DependabotPR,
@@ -197,6 +198,16 @@ export class BatchOrchestrator {
         };
       }
       core.warning(`PR #${pr.number}: agent gave up on conflict: ${resolution.reason}`);
+      await this.merger.abortMerge();
+      const gaveUp: AgentGaveUp = {
+        stage: 'conflict',
+        reason: resolution.reason,
+        outputTail: resolution.outputTail,
+      };
+      return {
+        result: this.toPrResult(pr, { kind: 'merge-conflict', files: conflictedFiles }, undefined, gaveUp),
+        pushed: false,
+      };
     }
 
     await this.merger.abortMerge();
@@ -216,6 +227,7 @@ export class BatchOrchestrator {
   ): Promise<{ result: PRResult; pushed: boolean }> {
     core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
 
+    let agentGaveUp: AgentGaveUp | undefined;
     if (config.agenticResolve) {
       const resolution = await this.resolver.resolveValidation({ pr, validation });
       if (resolution.kind === 'resolved') {
@@ -243,6 +255,11 @@ export class BatchOrchestrator {
         };
       }
       core.warning(`PR #${pr.number}: agent gave up on validation fix: ${resolution.reason}`);
+      agentGaveUp = {
+        stage: 'validation',
+        reason: resolution.reason,
+        outputTail: resolution.outputTail,
+      };
     }
 
     const explanation = await this.analyzer.explain({ pr, validation });
@@ -250,7 +267,7 @@ export class BatchOrchestrator {
     await this.merger.dropLastMerge(config.onFailure, pr);
     const pushed = await this.pushIfRevertCommit(config, integrationBranch, pr);
     return {
-      result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed }),
+      result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed }, undefined, agentGaveUp),
       pushed,
     };
   }
@@ -305,16 +322,25 @@ export class BatchOrchestrator {
     };
   }
 
-  private toPrResult(pr: DependabotPR, outcome: ProcessStepOutcome, agentAttempt?: AgentAttempt): PRResult {
+  private toPrResult(
+    pr: DependabotPR,
+    outcome: ProcessStepOutcome,
+    agentAttempt?: AgentAttempt,
+    agentGaveUp?: AgentGaveUp,
+  ): PRResult {
+    const agentFields = {
+      ...(agentAttempt && { agentAttempt }),
+      ...(agentGaveUp && { agentGaveUp }),
+    };
     switch (outcome.kind) {
       case 'pass':
-        return { pr, status: 'PASS', ...(agentAttempt && { agentAttempt }) };
+        return { pr, status: 'PASS', ...agentFields };
       case 'merge-conflict':
         return {
           pr,
           status: 'FAIL',
           failure: { kind: 'merge-conflict', files: outcome.files },
-          ...(agentAttempt && { agentAttempt }),
+          ...agentFields,
         };
       case 'push-rejected':
         return {
@@ -325,7 +351,7 @@ export class BatchOrchestrator {
             reason: outcome.reason,
             message: outcome.message,
           },
-          ...(agentAttempt && { agentAttempt }),
+          ...agentFields,
         };
       case 'validation-failed':
         return {
@@ -340,7 +366,7 @@ export class BatchOrchestrator {
             summary: outcome.explanation.summary,
             details: outcome.explanation.body,
           },
-          ...(agentAttempt && { agentAttempt }),
+          ...agentFields,
         };
     }
   }
