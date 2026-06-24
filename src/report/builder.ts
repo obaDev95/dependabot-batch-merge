@@ -109,6 +109,11 @@ export class ReportBuilder {
       const icon = r.status === 'PASS' ? '✅' : '❌';
       let category = '';
       let note = '';
+      if (r.skipped) {
+        category = '⏱ skipped (wall-clock)';
+        note = '';
+        return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(category)} | ${escapePipes(note)} |`;
+      }
       if (r.status === 'PASS') {
         category = r.agentAttempt ? '🤖 agent-assisted' : '—';
       } else if (r.failure?.kind === 'merge-conflict') {
