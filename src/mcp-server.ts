@@ -121,12 +121,14 @@ server.registerTool(
                       kind: 'resolved' as const,
                       commitSha: r.agentAttempt.commitSha,
                       summary: r.agentAttempt.summary,
+                      outputTail: r.agentAttempt.outputTail,
                     }
                   : r.agentGaveUp
                     ? {
                         kind: 'gave-up' as const,
                         stage: r.agentGaveUp.stage,
                         reason: r.agentGaveUp.reason,
+                        outputTail: r.agentGaveUp.outputTail,
                       }
                     : { kind: 'none' as const },
               })),
