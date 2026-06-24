@@ -32312,6 +32312,16 @@ class BatchOrchestrator {
                 };
             }
             core.warning(`PR #${pr.number}: agent gave up on conflict: ${resolution.reason}`);
+            await this.merger.abortMerge();
+            const gaveUp = {
+                stage: 'conflict',
+                reason: resolution.reason,
+                outputTail: resolution.outputTail,
+            };
+            return {
+                result: this.toPrResult(pr, { kind: 'merge-conflict', files: conflictedFiles }, undefined, gaveUp),
+                pushed: false,
+            };
         }
         await this.merger.abortMerge();
         core.warning(`Merge conflict for PR #${pr.number}`);
@@ -32322,6 +32332,7 @@ class BatchOrchestrator {
     }
     async handleValidationFailure(pr, config, integrationBranch, validation, preMergeSha) {
         core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
+        let agentGaveUp;
         if (config.agenticResolve) {
             const resolution = await this.resolver.resolveValidation({ pr, validation });
             if (resolution.kind === 'resolved') {
@@ -32350,13 +32361,18 @@ class BatchOrchestrator {
                 };
             }
             core.warning(`PR #${pr.number}: agent gave up on validation fix: ${resolution.reason}`);
+            agentGaveUp = {
+                stage: 'validation',
+                reason: resolution.reason,
+                outputTail: resolution.outputTail,
+            };
         }
         const explanation = await this.analyzer.explain({ pr, validation });
         core.info(`PR #${pr.number} categorized as ${explanation.category} — ${explanation.cause}`);
         await this.merger.dropLastMerge(config.onFailure, pr);
         const pushed = await this.pushIfRevertCommit(config, integrationBranch, pr);
         return {
-            result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed }),
+            result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed }, undefined, agentGaveUp),
             pushed,
         };
     }
@@ -32393,16 +32409,20 @@ class BatchOrchestrator {
             pushed: false,
         };
     }
-    toPrResult(pr, outcome, agentAttempt) {
+    toPrResult(pr, outcome, agentAttempt, agentGaveUp) {
+        const agentFields = {
+            ...(agentAttempt && { agentAttempt }),
+            ...(agentGaveUp && { agentGaveUp }),
+        };
         switch (outcome.kind) {
             case 'pass':
-                return { pr, status: 'PASS', ...(agentAttempt && { agentAttempt }) };
+                return { pr, status: 'PASS', ...agentFields };
             case 'merge-conflict':
                 return {
                     pr,
                     status: 'FAIL',
                     failure: { kind: 'merge-conflict', files: outcome.files },
-                    ...(agentAttempt && { agentAttempt }),
+                    ...agentFields,
                 };
             case 'push-rejected':
                 return {
@@ -32413,7 +32433,7 @@ class BatchOrchestrator {
                         reason: outcome.reason,
                         message: outcome.message,
                     },
-                    ...(agentAttempt && { agentAttempt }),
+                    ...agentFields,
                 };
             case 'validation-failed':
                 return {
@@ -32428,7 +32448,7 @@ class BatchOrchestrator {
                         summary: outcome.explanation.summary,
                         details: outcome.explanation.body,
                     },
-                    ...(agentAttempt && { agentAttempt }),
+                    ...agentFields,
                 };
         }
     }
@@ -32544,6 +32564,9 @@ class ReportBuilder {
                 category = pushRejectLabel(r.failure.reason);
                 note = r.failure.message;
             }
+            if (r.status === 'FAIL' && r.agentGaveUp) {
+                category = `🤖 gave up — ${category}`;
+            }
             return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(category)} | ${escapePipes(note)} |`;
         });
         return [header, ...rows].join('\n');
@@ -32582,9 +32605,10 @@ class ReportBuilder {
     failureEntry(r) {
         const head = `- [#${r.pr.number}](${r.pr.htmlUrl}) — ${r.pr.title}`;
         const agentBlock = r.agentAttempt ? this.agentAttemptBlock(r.agentAttempt) : '';
+        const gaveUpBlock = r.agentGaveUp ? this.agentGaveUpBlock(r.agentGaveUp) : '';
         if (r.failure?.kind === 'merge-conflict') {
             const files = r.failure.files.map((f) => `    - \`${f}\``).join('\n');
-            return `${head}\n  Conflicting files:\n${files}${agentBlock}`;
+            return `${head}\n  Conflicting files:\n${files}${agentBlock}${gaveUpBlock}`;
         }
         if (r.failure?.kind === 'validation-failed') {
             return [
@@ -32592,6 +32616,7 @@ class ReportBuilder {
                 `  - **Cause:** ${r.failure.cause}`,
                 `  - **Exit code:** ${r.failure.exitCode}`,
                 agentBlock,
+                gaveUpBlock,
                 ``,
                 `  <details><summary>Validation output (tail)</summary>`,
                 ``,
@@ -32604,7 +32629,7 @@ class ReportBuilder {
             ].filter((l) => l !== undefined).join('\n');
         }
         if (r.failure?.kind === 'push-rejected') {
-            return `${head}\n  - **Push rejected:** ${r.failure.message}${agentBlock}`;
+            return `${head}\n  - **Push rejected:** ${r.failure.message}${agentBlock}${gaveUpBlock}`;
         }
         return head;
     }
@@ -32615,6 +32640,18 @@ class ReportBuilder {
             ``,
             '  ```',
             attempt.outputTail || '(no output)',
+            '  ```',
+            ``,
+            `  </details>`,
+        ].join('\n');
+    }
+    agentGaveUpBlock(gaveUp) {
+        return [
+            ``,
+            `  <details><summary>Agent gave up — ${gaveUp.stage} — ${escapePipes(gaveUp.reason)}</summary>`,
+            ``,
+            '  ```',
+            gaveUp.outputTail || '(no output)',
             '  ```',
             ``,
             `  </details>`,
@@ -32700,7 +32737,10 @@ class NoopAgenticResolver {
 function defaultSpawn(args, env, timeoutMs) {
     return new Promise((resolve) => {
         let output = '';
-        const child = (0,external_node_child_process_namespaceObject.spawn)('claude', args, { env, timeout: timeoutMs });
+        // ponytail: explicit cwd so the agent sees the same working tree as the
+        // orchestrator's git ops. Inheriting silently works today but breaks the
+        // moment anyone introduces a chdir between MCP startup and resolver call.
+        const child = (0,external_node_child_process_namespaceObject.spawn)('claude', args, { env, timeout: timeoutMs, cwd: process.cwd() });
         child.stdout.on('data', (d) => { output += d.toString(); });
         child.stderr.on('data', (d) => { output += d.toString(); });
         child.on('close', (code) => {
