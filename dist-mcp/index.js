@@ -60007,12 +60007,14 @@ class ClaudeAgenticResolver {
         const outputTail = tail(output);
         if (timedOut) {
             lib_core.warning(`PR #${prNumber}: agent timed out after ${this.timeoutMs}ms`);
+            logOutputTail(prNumber, outputTail);
             return { kind: 'gave-up', reason: `timed out after ${this.timeoutMs}ms`, outputTail };
         }
         const postSha = await this.currentSha();
         if (postSha === preSha) {
             const reason = exitCode === 0 ? 'agent made no commits' : `agent exited ${exitCode} without committing`;
             lib_core.warning(`PR #${prNumber}: ${reason}`);
+            logOutputTail(prNumber, outputTail);
             return { kind: 'gave-up', reason, outputTail };
         }
         lib_core.info(`PR #${prNumber}: agent committed fix at ${postSha.slice(0, 7)}`);
@@ -60032,6 +60034,14 @@ function tail(text, bytes = 4000) {
     if (text.length <= bytes)
         return text;
     return `…(truncated)…\n${text.slice(-bytes)}`;
+}
+// Dump the agent's tail to stderr (safe in MCP stdio mode, since stdout is the
+// JSON-RPC channel) so the operator can see it live, before the structured
+// response is returned at end-of-batch.
+function logOutputTail(prNumber, outputTail) {
+    if (!outputTail)
+        return;
+    console.error(`[agent #${prNumber} tail begin]\n${outputTail}\n[agent #${prNumber} tail end]`);
 }
 function claude_resolver_firstLine(text) {
     const idx = text.indexOf('\n');
@@ -60211,12 +60221,14 @@ server.registerTool('run-batch-merge', {
                                 kind: 'resolved',
                                 commitSha: r.agentAttempt.commitSha,
                                 summary: r.agentAttempt.summary,
+                                outputTail: r.agentAttempt.outputTail,
                             }
                             : r.agentGaveUp
                                 ? {
                                     kind: 'gave-up',
                                     stage: r.agentGaveUp.stage,
                                     reason: r.agentGaveUp.reason,
+                                    outputTail: r.agentGaveUp.outputTail,
                                 }
                                 : { kind: 'none' },
                     })),
