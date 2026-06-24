@@ -32207,6 +32207,10 @@ class BatchOrchestrator {
     reporter;
     prWriter;
     resolver;
+    /** Counts every successful resolver invocation in the current run, for the per-batch cap. */
+    agentCalls = 0;
+    /** Wall-clock start of the current run; used for the per-batch time cap. */
+    startedAt = 0;
     constructor(prLister, branchManager, merger, validator, analyzer, reporter, prWriter, resolver) {
         this.prLister = prLister;
         this.branchManager = branchManager;
@@ -32218,6 +32222,8 @@ class BatchOrchestrator {
         this.resolver = resolver;
     }
     async run(config) {
+        this.agentCalls = 0;
+        this.startedAt = Date.now();
         const integrationBranch = await this.branchManager.createIntegrationBranch(config.integrationBranchPrefix, config.baseBranch);
         core.info(`Integration branch: ${integrationBranch}`);
         const candidates = await this.prLister.extractOpenPullRequests(config.dependabotAuthor, config.maxPrs);
@@ -32234,6 +32240,17 @@ class BatchOrchestrator {
         }
         const results = [];
         for (let i = 0; i < candidates.length; i++) {
+            if (this.wallClockExhausted(config)) {
+                core.warning(`Batch wall-clock cap (${config.maxBatchWallClockSeconds}s) reached after ${i} PR(s); skipping remaining ${candidates.length - i}`);
+                for (const remaining of candidates.slice(i)) {
+                    results.push({
+                        pr: remaining,
+                        status: 'FAIL',
+                        skipped: { reason: 'wall-clock-cap' },
+                    });
+                }
+                break;
+            }
             const pr = candidates[i];
             core.startGroup(`Processing PR #${pr.number} — ${pr.title}`);
             const { result, pushed } = await this.processPr(pr, config, integrationBranch);
@@ -32269,6 +32286,15 @@ class BatchOrchestrator {
     shouldUpdateBodyDuringLoop(processedIndex) {
         return (processedIndex + 1) % BODY_UPDATE_INTERVAL === 0;
     }
+    agentBudgetExhausted(config) {
+        return this.agentCalls >= config.maxAgentCallsPerBatch;
+    }
+    wallClockExhausted(config) {
+        return (Date.now() - this.startedAt) / 1000 >= config.maxBatchWallClockSeconds;
+    }
+    guardrailGaveUp(reason) {
+        return { stage: 'guardrail', reason, outputTail: '' };
+    }
     async updateBatchPrBody(prNumber, integrationBranch, baseBranch, results, finalSuite) {
         await this.prWriter.updatePrBody(prNumber, this.reporter.build({
             integrationBranch,
@@ -32291,7 +32317,16 @@ class BatchOrchestrator {
         return this.handleValidationFailure(pr, config, integrationBranch, validation, preMergeSha);
     }
     async handleMergeConflict(pr, config, integrationBranch, conflictedFiles, preMergeSha) {
+        if (config.agenticResolve && this.agentBudgetExhausted(config)) {
+            core.warning(`PR #${pr.number}: skipping agent conflict resolution (per-batch cap of ${config.maxAgentCallsPerBatch} reached)`);
+            await this.merger.abortMerge();
+            return {
+                result: this.toPrResult(pr, { kind: 'merge-conflict', files: conflictedFiles }, undefined, this.guardrailGaveUp('agent-call-cap')),
+                pushed: false,
+            };
+        }
         if (config.agenticResolve) {
+            this.agentCalls += 1;
             const resolution = await this.resolver.resolveConflict({ pr, conflictedFiles });
             if (resolution.kind === 'resolved') {
                 const agentAttempt = {
@@ -32333,7 +32368,12 @@ class BatchOrchestrator {
     async handleValidationFailure(pr, config, integrationBranch, validation, preMergeSha) {
         core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
         let agentGaveUp;
-        if (config.agenticResolve) {
+        if (config.agenticResolve && this.agentBudgetExhausted(config)) {
+            core.warning(`PR #${pr.number}: skipping agent validation fix (per-batch cap of ${config.maxAgentCallsPerBatch} reached)`);
+            agentGaveUp = this.guardrailGaveUp('agent-call-cap');
+        }
+        else if (config.agenticResolve) {
+            this.agentCalls += 1;
             const resolution = await this.resolver.resolveValidation({ pr, validation });
             if (resolution.kind === 'resolved') {
                 const agentAttempt = {
@@ -32549,6 +32589,11 @@ class ReportBuilder {
             const icon = r.status === 'PASS' ? '✅' : '❌';
             let category = '';
             let note = '';
+            if (r.skipped) {
+                category = '⏱ skipped (wall-clock)';
+                note = '';
+                return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(category)} | ${escapePipes(note)} |`;
+            }
             if (r.status === 'PASS') {
                 category = r.agentAttempt ? '🤖 agent-assisted' : '—';
             }
@@ -32958,6 +33003,8 @@ function parseConfig() {
         maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
         agenticResolve: parseBool(core.getInput('agentic-resolve'), false),
         agentTimeoutSeconds: parsePositiveInt(core.getInput('agent-timeout-seconds') || '600', 'agent-timeout-seconds'),
+        maxAgentCallsPerBatch: parsePositiveInt(core.getInput('max-agent-calls-per-batch') || '10', 'max-agent-calls-per-batch'),
+        maxBatchWallClockSeconds: parsePositiveInt(core.getInput('max-batch-wall-clock-seconds') || '3600', 'max-batch-wall-clock-seconds'),
     };
 }
 function parseFailureHandling(raw) {
