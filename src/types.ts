@@ -52,11 +52,18 @@ export type FailureReason =
       message: string;
     };
 
+export interface AgentGaveUp {
+  stage: 'conflict' | 'validation';
+  reason: string;
+  outputTail: string;
+}
+
 export interface PRResult {
   pr: DependabotPR;
   status: PRStatus;
   failure?: FailureReason;
   agentAttempt?: AgentAttempt;
+  agentGaveUp?: AgentGaveUp;
 }
 
 export interface ValidationOutcome {
