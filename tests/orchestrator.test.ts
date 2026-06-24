@@ -47,6 +47,7 @@ function makeMerger(overrides: Partial<Record<keyof PRMerger, unknown>> = {}): P
     abortMerge: vi.fn().mockResolvedValue(undefined),
     headSha: vi.fn().mockResolvedValue('pre-sha'),
     resetTo: vi.fn().mockResolvedValue(undefined),
+    revertRange: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   } as unknown as PRMerger;
 }
@@ -260,6 +261,47 @@ describe('BatchOrchestrator — agentic paths', () => {
     expect(merger.resetTo).toHaveBeenCalledWith('pre-sha');
     expect(merger.dropLastMerge).not.toHaveBeenCalled();
     expect(analyzer.explain).toHaveBeenCalledOnce();
+  });
+
+  it('reverts (not resets) and pushes when onFailure is revert-commit and agent fix still fails', async () => {
+    const pr = makePr({ number: 14 });
+    const merger = makeMerger();
+    const validator: ValidationRunner = {
+      run: vi.fn()
+        .mockResolvedValueOnce(failValidation)
+        .mockResolvedValueOnce(failValidation),
+    };
+    const analyzer: FailureAnalyzer = {
+      explain: vi.fn().mockResolvedValue({
+        category: 'type-error' as const,
+        categoryLabel: 'TypeScript error',
+        cause: 'still broken',
+        exitCode: 1,
+        summary: 'still broken',
+        body: 'details',
+      }),
+    };
+    const resolver: AgenticResolver = {
+      resolveConflict: vi.fn(),
+      resolveValidation: vi.fn().mockResolvedValue({
+        kind: 'resolved',
+        commitSha: 'partial-fix',
+        summary: 'partial fix',
+        outputTail: '',
+      }),
+    };
+    const branchManager = makeBranchManager();
+
+    const orchestrator = makeOrchestrator(makeLister([pr]), branchManager, merger, validator, analyzer, resolver);
+    const revertConfig: BatchConfig = { ...baseConfig, agenticResolve: true, onFailure: 'revert-commit' };
+    const summary = await orchestrator.run(revertConfig);
+
+    expect(summary.results[0]?.status).toBe('FAIL');
+    expect(merger.revertRange).toHaveBeenCalledWith('pre-sha', pr);
+    expect(merger.resetTo).not.toHaveBeenCalled();
+    expect(merger.dropLastMerge).not.toHaveBeenCalled();
+    expect(branchManager.push).toHaveBeenCalledWith('chore/dependabot-batch-2026-05-14');
+    expect(summary.results[0]?.failure?.kind).toBe('validation-failed');
   });
 });
 

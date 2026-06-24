@@ -48,6 +48,20 @@ export class PRMerger {
     ]);
   }
 
+  /**
+   * Reverts every commit since `preMergeSha` (e.g. a merge plus one or more
+   * agent fix commits) as a single new commit, since `git revert -m 1` only
+   * handles exactly one merge commit at HEAD.
+   */
+  async revertRange(preMergeSha: string, pr: DependabotPR): Promise<void> {
+    await this.git.run(['read-tree', '--reset', '-u', preMergeSha]);
+    await this.git.run([
+      'commit',
+      '-m',
+      `Revert merge of #${pr.number} (validation failed after agent fix)`,
+    ]);
+  }
+
   private async detectConflicts(): Promise<string[]> {
     const result = await this.git.run(['diff', '--name-only', '--diff-filter=U'], {
       ignoreReturnCode: true,
