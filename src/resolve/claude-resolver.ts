@@ -121,6 +121,7 @@ export class ClaudeAgenticResolver implements AgenticResolver {
 
     if (timedOut) {
       core.warning(`PR #${prNumber}: agent timed out after ${this.timeoutMs}ms`);
+      logOutputTail(prNumber, outputTail);
       return { kind: 'gave-up', reason: `timed out after ${this.timeoutMs}ms`, outputTail };
     }
 
@@ -128,6 +129,7 @@ export class ClaudeAgenticResolver implements AgenticResolver {
     if (postSha === preSha) {
       const reason = exitCode === 0 ? 'agent made no commits' : `agent exited ${exitCode} without committing`;
       core.warning(`PR #${prNumber}: ${reason}`);
+      logOutputTail(prNumber, outputTail);
       return { kind: 'gave-up', reason, outputTail };
     }
 
@@ -149,6 +151,14 @@ export class ClaudeAgenticResolver implements AgenticResolver {
 function tail(text: string, bytes = 4000): string {
   if (text.length <= bytes) return text;
   return `…(truncated)…\n${text.slice(-bytes)}`;
+}
+
+// Dump the agent's tail to stderr (safe in MCP stdio mode, since stdout is the
+// JSON-RPC channel) so the operator can see it live, before the structured
+// response is returned at end-of-batch.
+function logOutputTail(prNumber: number, outputTail: string): void {
+  if (!outputTail) return;
+  console.error(`[agent #${prNumber} tail begin]\n${outputTail}\n[agent #${prNumber} tail end]`);
 }
 
 function firstLine(text: string): string {
