@@ -50,6 +50,24 @@ describe('ClaudeAgenticResolver', () => {
     expect(env['ANTHROPIC_API_KEY']).toBe('test-key');
   });
 
+  it('strips ANTHROPIC_API_KEY from the child env when no key is given (subscription mode)', async () => {
+    const git = makeGit(['aaa', 'bbb']);
+    const spawnFn = vi.fn().mockResolvedValue({ output: 'done', timedOut: false, exitCode: 0 });
+
+    const prev = process.env.ANTHROPIC_API_KEY;
+    process.env.ANTHROPIC_API_KEY = 'inherited-stale-key';
+    try {
+      const resolver = new ClaudeAgenticResolver(undefined, git, 10_000, spawnFn);
+      await resolver.resolveValidation({ pr, validation });
+    } finally {
+      if (prev === undefined) delete process.env.ANTHROPIC_API_KEY;
+      else process.env.ANTHROPIC_API_KEY = prev;
+    }
+
+    const [, env] = spawnFn.mock.calls[0] as [string[], NodeJS.ProcessEnv, number];
+    expect(env['ANTHROPIC_API_KEY']).toBeUndefined();
+  });
+
   it('returns gave-up when agent exits without committing', async () => {
     const git = makeGit(['aaa', 'aaa']); // SHA unchanged
     const spawnFn = vi.fn().mockResolvedValue({ output: 'I cannot fix this', timedOut: false, exitCode: 0 });

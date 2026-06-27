@@ -28,10 +28,9 @@ export interface ExecuteBatchOptions {
 export async function executeBatch(options: ExecuteBatchOptions): Promise<BatchSummary> {
   const { config, token, anthropicApiKey } = options;
 
-  if (config.agenticResolve && !anthropicApiKey) {
-    throw new Error('agentic-resolve requires anthropic-api-key');
-  }
-
+  // No key => subscription mode: the spawned CLI agent authenticates via the
+  // claude.ai login. Only the SDK-based analyzer needs a real key (falls back to
+  // static explanations without one).
   const gitRunner = new GitRunner();
   await gitRunner.configureIdentity(GIT_BOT_NAME, GIT_BOT_EMAIL);
 
@@ -69,6 +68,6 @@ function buildResolver(
   gitRunner: GitRunner,
   config: BatchConfig,
 ): AgenticResolver {
-  if (!config.agenticResolve || !anthropicApiKey) return new NoopAgenticResolver();
+  if (!config.agenticResolve) return new NoopAgenticResolver();
   return new ClaudeAgenticResolver(anthropicApiKey, gitRunner, config.agentTimeoutSeconds * 1000);
 }
