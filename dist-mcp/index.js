@@ -60047,7 +60047,13 @@ class ClaudeAgenticResolver {
     async runAgent(prompt, prNumber, kind) {
         const preSha = await this.currentSha();
         lib_core.info(`PR #${prNumber}: invoking Claude agent for ${kind} fix (pre: ${preSha.slice(0, 7)})`);
-        const env = { ...process.env, ANTHROPIC_API_KEY: this.apiKey };
+        // ponytail: no key => subscription mode. Strip any inherited key so the CLI
+        // falls back to the claude.ai login instead of a dead/over-quota corporate key.
+        const env = { ...process.env };
+        if (this.apiKey)
+            env.ANTHROPIC_API_KEY = this.apiKey;
+        else
+            delete env.ANTHROPIC_API_KEY;
         const { output, timedOut, exitCode } = await this.spawnFn(['-p', prompt, '--dangerously-skip-permissions'], env, this.timeoutMs);
         const outputTail = tail(output);
         if (timedOut) {
@@ -60146,9 +60152,9 @@ const GIT_BOT_NAME = 'dependabot-batch-merge[bot]';
 const GIT_BOT_EMAIL = 'dependabot-batch-merge@users.noreply.github.com';
 async function executeBatch(options) {
     const { config, token, anthropicApiKey } = options;
-    if (config.agenticResolve && !anthropicApiKey) {
-        throw new Error('agentic-resolve requires anthropic-api-key');
-    }
+    // No key => subscription mode: the spawned CLI agent authenticates via the
+    // claude.ai login. Only the SDK-based analyzer needs a real key (falls back to
+    // static explanations without one).
     const gitRunner = new GitRunner();
     await gitRunner.configureIdentity(GIT_BOT_NAME, GIT_BOT_EMAIL);
     const gh = new GitHubClient(token, config.owner, config.repo);
@@ -60169,7 +60175,7 @@ function buildAnalyzer(anthropicApiKey) {
     return new ClaudeFailureAnalyzer({ apiKey: anthropicApiKey });
 }
 function buildResolver(anthropicApiKey, gitRunner, config) {
-    if (!config.agenticResolve || !anthropicApiKey)
+    if (!config.agenticResolve)
         return new NoopAgenticResolver();
     return new ClaudeAgenticResolver(anthropicApiKey, gitRunner, config.agentTimeoutSeconds * 1000);
 }

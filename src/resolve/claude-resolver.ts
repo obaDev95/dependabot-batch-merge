@@ -50,7 +50,7 @@ export class ClaudeAgenticResolver implements AgenticResolver {
   private readonly spawnFn: SpawnFn;
 
   constructor(
-    private readonly apiKey: string,
+    private readonly apiKey: string | undefined,
     private readonly git: GitRunner,
     private readonly timeoutMs: number,
     spawnFn?: SpawnFn,
@@ -110,7 +110,11 @@ export class ClaudeAgenticResolver implements AgenticResolver {
     const preSha = await this.currentSha();
     core.info(`PR #${prNumber}: invoking Claude agent for ${kind} fix (pre: ${preSha.slice(0, 7)})`);
 
-    const env: NodeJS.ProcessEnv = { ...process.env, ANTHROPIC_API_KEY: this.apiKey };
+    // ponytail: no key => subscription mode. Strip any inherited key so the CLI
+    // falls back to the claude.ai login instead of a dead/over-quota corporate key.
+    const env: NodeJS.ProcessEnv = { ...process.env };
+    if (this.apiKey) env.ANTHROPIC_API_KEY = this.apiKey;
+    else delete env.ANTHROPIC_API_KEY;
     const { output, timedOut, exitCode } = await this.spawnFn(
       ['-p', prompt, '--dangerously-skip-permissions'],
       env,
