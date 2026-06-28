@@ -59975,7 +59975,9 @@ function defaultSpawn(args, env, timeoutMs) {
         // ponytail: explicit cwd so the agent sees the same working tree as the
         // orchestrator's git ops. Inheriting silently works today but breaks the
         // moment anyone introduces a chdir between MCP startup and resolver call.
-        const child = (0,external_node_child_process_namespaceObject.spawn)('claude', args, { env, timeout: timeoutMs, cwd: process.cwd() });
+        // stdin must be closed: with an open stdin pipe the headless agent waits for
+        // input that never comes and hangs until the timeout kill (empty output).
+        const child = (0,external_node_child_process_namespaceObject.spawn)('claude', args, { env, timeout: timeoutMs, cwd: process.cwd(), stdio: ['ignore', 'pipe', 'pipe'] });
         child.stdout.on('data', (d) => { output += d.toString(); });
         child.stderr.on('data', (d) => { output += d.toString(); });
         child.on('close', (code) => {
