@@ -239,13 +239,12 @@ export class BatchOrchestrator {
         if (validation.passed) {
           return this.validateAndPush(pr, integrationBranch, validation, agentAttempt);
         }
-        core.warning(`PR #${pr.number}: agent conflict fix did not pass validation, resetting`);
-        await this.merger.resetTo(preMergeSha);
-        const explanation = await this.analyzer.explain({ pr, validation });
-        return {
-          result: this.toPrResult(pr, { kind: 'validation-failed', explanation, pushed: false }, agentAttempt),
-          pushed: false,
-        };
+        // Conflict resolved, but the merged result fails validation. Stay
+        // autonomous: hand off to the validation-fix agent instead of giving up,
+        // so one PR can have its conflict AND the breakage it introduced fixed
+        // in a single pass.
+        core.warning(`PR #${pr.number}: agent conflict fix did not pass validation, attempting validation fix`);
+        return this.handleValidationFailure(pr, config, integrationBranch, validation, preMergeSha);
       }
       core.warning(`PR #${pr.number}: agent gave up on conflict: ${resolution.reason}`);
       await this.merger.abortMerge();

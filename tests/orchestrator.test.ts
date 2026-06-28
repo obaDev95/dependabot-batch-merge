@@ -176,6 +176,35 @@ describe('BatchOrchestrator — agentic paths', () => {
     expect(analyzer.explain).not.toHaveBeenCalled();
   });
 
+  it('hands a resolved-conflict-then-failing-validation off to the validation-fix agent', async () => {
+    const pr = makePr({ number: 11 });
+    const merger = makeMerger({
+      merge: vi.fn().mockResolvedValue({ kind: 'conflict', conflictedFiles: ['package.json'] }),
+    });
+    // post-conflict validation fails; after the validation-fix agent commits, it passes
+    const validator: ValidationRunner = {
+      run: vi.fn().mockResolvedValueOnce(failValidation).mockResolvedValue(passValidation),
+    };
+    const analyzer: FailureAnalyzer = { explain: vi.fn() };
+    const resolver: AgenticResolver = {
+      resolveConflict: vi.fn().mockResolvedValue({
+        kind: 'resolved', commitSha: 'conflict-sha', summary: 'resolved conflict', outputTail: 'c',
+      }),
+      resolveValidation: vi.fn().mockResolvedValue({
+        kind: 'resolved', commitSha: 'valfix-sha', summary: 'fixed validation', outputTail: 'v',
+      }),
+    };
+
+    const orchestrator = makeOrchestrator(makeLister([pr]), makeBranchManager(), merger, validator, analyzer, resolver);
+    const summary = await orchestrator.run(agenticConfig);
+
+    // The gap this guards: a resolved conflict that then fails validation must
+    // NOT give up — it must invoke the validation-fix agent and can end PASS.
+    expect(resolver.resolveValidation).toHaveBeenCalledOnce();
+    expect(summary.results[0]?.status).toBe('PASS');
+    expect(summary.results[0]?.agentAttempt?.commitSha).toBe('valfix-sha');
+  });
+
   it('falls back to merge-conflict FAIL when resolver gives up on conflict', async () => {
     const pr = makePr({ number: 11 });
     const merger = makeMerger({
