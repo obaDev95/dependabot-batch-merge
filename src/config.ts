@@ -19,7 +19,7 @@ export function parseConfig(): BatchConfig {
     draftPr: parseBool(core.getInput('draft-pr'), true),
     maxPrs: parsePositiveInt(core.getInput('max-prs') || '20', 'max-prs'),
     agenticResolve: parseBool(core.getInput('agentic-resolve'), false),
-    agentTimeoutSeconds: parsePositiveInt(core.getInput('agent-timeout-seconds') || '600', 'agent-timeout-seconds'),
+    agentTimeoutSeconds: parsePositiveInt(core.getInput('agent-timeout-seconds') || '1200', 'agent-timeout-seconds'),
     maxAgentCallsPerBatch: parsePositiveInt(
       core.getInput('max-agent-calls-per-batch') || '10',
       'max-agent-calls-per-batch',

@@ -51,7 +51,7 @@ server.registerTool(
         .optional()
         .describe('Anthropic API key for Claude-powered failure explanations and agentic resolution. Defaults to $ANTHROPIC_API_KEY.'),
       agenticResolve: z.boolean().default(false).describe('Invoke Claude agent to attempt fixes before recording failures'),
-      agentTimeoutSeconds: z.number().int().positive().default(600).describe('Per-attempt timeout for the Claude agent'),
+      agentTimeoutSeconds: z.number().int().positive().default(1200).describe('Per-attempt timeout for the Claude agent'),
       maxAgentCallsPerBatch: z.number().int().positive().default(10).describe('Hard cap on Claude agent invocations across the whole batch (cost guardrail)'),
       maxBatchWallClockSeconds: z.number().int().positive().default(3600).describe('Hard cap on total batch wall-clock seconds; remaining PRs are skipped once exceeded'),
     },

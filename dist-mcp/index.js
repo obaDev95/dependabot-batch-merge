@@ -60054,7 +60054,11 @@ class ClaudeAgenticResolver {
             env.ANTHROPIC_API_KEY = this.apiKey;
         else
             delete env.ANTHROPIC_API_KEY;
-        const { output, timedOut, exitCode } = await this.spawnFn(['-p', prompt, '--dangerously-skip-permissions'], env, this.timeoutMs);
+        // Stream the agent's events (stream-json requires --verbose) so a slow or
+        // timed-out run still leaves a diagnostic tail. Plain `-p` only prints the
+        // final text, so a kill-on-timeout captured nothing — which is exactly when
+        // we most need to see what the agent was stuck on.
+        const { output, timedOut, exitCode } = await this.spawnFn(['-p', prompt, '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions'], env, this.timeoutMs);
         const outputTail = tail(output);
         if (timedOut) {
             lib_core.warning(`PR #${prNumber}: agent timed out after ${this.timeoutMs}ms`);
@@ -60072,7 +60076,7 @@ class ClaudeAgenticResolver {
         return {
             kind: 'resolved',
             commitSha: postSha,
-            summary: claude_resolver_firstLine(output) || `Agent ${kind} fix`,
+            summary: `Agent resolved ${kind} fix`,
             outputTail,
         };
     }
@@ -60093,10 +60097,6 @@ function logOutputTail(prNumber, outputTail) {
     if (!outputTail)
         return;
     console.error(`[agent #${prNumber} tail begin]\n${outputTail}\n[agent #${prNumber} tail end]`);
-}
-function claude_resolver_firstLine(text) {
-    const idx = text.indexOf('\n');
-    return idx === -1 ? text.trim() : text.slice(0, idx).trim();
 }
 
 ;// CONCATENATED MODULE: ./src/validation/command-runner.ts
@@ -60221,7 +60221,7 @@ server.registerTool('run-batch-merge', {
             .optional()
             .describe('Anthropic API key for Claude-powered failure explanations and agentic resolution. Defaults to $ANTHROPIC_API_KEY.'),
         agenticResolve: classic_schemas_boolean().default(false).describe('Invoke Claude agent to attempt fixes before recording failures'),
-        agentTimeoutSeconds: classic_schemas_number().int().positive().default(600).describe('Per-attempt timeout for the Claude agent'),
+        agentTimeoutSeconds: classic_schemas_number().int().positive().default(1200).describe('Per-attempt timeout for the Claude agent'),
         maxAgentCallsPerBatch: classic_schemas_number().int().positive().default(10).describe('Hard cap on Claude agent invocations across the whole batch (cost guardrail)'),
         maxBatchWallClockSeconds: classic_schemas_number().int().positive().default(3600).describe('Hard cap on total batch wall-clock seconds; remaining PRs are skipped once exceeded'),
     },
