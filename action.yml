@@ -49,6 +49,14 @@ inputs:
     description: 'Per-attempt timeout in seconds for the Claude agent. Ignored when agentic-resolve is false.'
     required: false
     default: '600'
+  max-agent-calls-per-batch:
+    description: 'Hard cap on Claude agent invocations across the whole batch (cost guardrail).'
+    required: false
+    default: '10'
+  max-batch-wall-clock-seconds:
+    description: 'Hard cap on total batch wall-clock seconds; remaining PRs are skipped once exceeded.'
+    required: false
+    default: '3600'
   github-token:
     description: 'Token used for GitHub API calls. Defaults to the workflow GITHUB_TOKEN.'
     required: false

@@ -13,6 +13,8 @@ export interface BatchConfig {
   repo: string;
   agenticResolve: boolean;
   agentTimeoutSeconds: number;
+  maxAgentCallsPerBatch: number;
+  maxBatchWallClockSeconds: number;
 }
 
 /** Metadata for a Claude agent attempt on a PR. Only present when the agent committed something. */
@@ -53,7 +55,11 @@ export type FailureReason =
     };
 
 export interface AgentGaveUp {
-  stage: 'conflict' | 'validation';
+  /**
+   * 'conflict' / 'validation' — agent ran and returned without committing.
+   * 'guardrail' — agent was not invoked because a per-batch cap was hit.
+   */
+  stage: 'conflict' | 'validation' | 'guardrail';
   reason: string;
   outputTail: string;
 }
@@ -64,6 +70,8 @@ export interface PRResult {
   failure?: FailureReason;
   agentAttempt?: AgentAttempt;
   agentGaveUp?: AgentGaveUp;
+  /** Set when the orchestrator never processed this PR due to a batch-level cap. */
+  skipped?: { reason: 'wall-clock-cap' };
 }
 
 export interface ValidationOutcome {

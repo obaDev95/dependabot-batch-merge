@@ -23,6 +23,8 @@ const baseConfig: BatchConfig = {
   maxPrs: 20,
   agenticResolve: false,
   agentTimeoutSeconds: 600,
+  maxAgentCallsPerBatch: 10,
+  maxBatchWallClockSeconds: 3600,
 };
 
 function makePr(overrides: Partial<DependabotPR> = {}): DependabotPR {
@@ -370,6 +372,74 @@ describe('BatchOrchestrator — agentic paths', () => {
     expect(merger.dropLastMerge).not.toHaveBeenCalled();
     expect(branchManager.push).toHaveBeenCalledWith('chore/dependabot-batch-2026-05-14');
     expect(summary.results[0]?.failure?.kind).toBe('validation-failed');
+  });
+});
+
+describe('BatchOrchestrator — guardrails', () => {
+  it('stops invoking the resolver once maxAgentCallsPerBatch is reached', async () => {
+    const prs = [makePr({ number: 20 }), makePr({ number: 21 }), makePr({ number: 22 })];
+    const merger = makeMerger();
+    const validator: ValidationRunner = { run: vi.fn().mockResolvedValue(failValidation) };
+    const analyzer: FailureAnalyzer = {
+      explain: vi.fn().mockResolvedValue({
+        category: 'unknown' as const,
+        categoryLabel: 'unknown',
+        cause: 'broke',
+        exitCode: 1,
+        summary: 'broke',
+        body: 'details',
+      }),
+    };
+    const resolveValidation = vi.fn().mockResolvedValue({
+      kind: 'gave-up',
+      reason: 'agent made no commits',
+      outputTail: 'tail',
+    });
+    const resolver: AgenticResolver = { resolveConflict: vi.fn(), resolveValidation };
+
+    const orchestrator = makeOrchestrator(makeLister(prs), makeBranchManager(), merger, validator, analyzer, resolver);
+    const cappedConfig: BatchConfig = { ...baseConfig, agenticResolve: true, maxAgentCallsPerBatch: 2 };
+    const summary = await orchestrator.run(cappedConfig);
+
+    expect(resolveValidation).toHaveBeenCalledTimes(2);
+    expect(summary.results[2]?.agentGaveUp).toEqual({
+      stage: 'guardrail',
+      reason: 'agent-call-cap',
+      outputTail: '',
+    });
+    expect(summary.results[0]?.agentGaveUp?.stage).toBe('validation');
+    expect(summary.results[1]?.agentGaveUp?.stage).toBe('validation');
+  });
+
+  it('breaks the loop and marks remaining PRs as skipped when wall-clock cap is reached', async () => {
+    const prs = [makePr({ number: 30 }), makePr({ number: 31 }), makePr({ number: 32 })];
+    const merger = makeMerger();
+    const validator: ValidationRunner = { run: vi.fn().mockResolvedValue(passValidation) };
+    const analyzer: FailureAnalyzer = { explain: vi.fn() };
+
+    // Stacked Date.now() returns: startedAt=0, iter-0 check=500ms (< 1s cap, process),
+    // every subsequent call=5_000_000ms (>> 1s cap, break + skip remaining).
+    const dateSpy = vi
+      .spyOn(Date, 'now')
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(500)
+      .mockReturnValue(5_000_000);
+
+    try {
+      const orchestrator = makeOrchestrator(makeLister(prs), makeBranchManager(), merger, validator, analyzer);
+      const tightConfig: BatchConfig = { ...baseConfig, maxBatchWallClockSeconds: 1 };
+      const summary = await orchestrator.run(tightConfig);
+
+      const passed = summary.results.filter((r) => r.status === 'PASS');
+      const skipped = summary.results.filter((r) => r.skipped);
+      expect(passed).toHaveLength(1);
+      expect(skipped).toHaveLength(2);
+      expect(skipped[0]?.skipped).toEqual({ reason: 'wall-clock-cap' });
+      expect(skipped[0]?.status).toBe('FAIL');
+      expect(skipped[1]?.pr.number).toBe(32);
+    } finally {
+      dateSpy.mockRestore();
+    }
   });
 });
 

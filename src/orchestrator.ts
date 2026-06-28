@@ -34,6 +34,11 @@ type ProcessStepOutcome =
   | { kind: 'validation-failed'; explanation: FailureExplanation; pushed: boolean };
 
 export class BatchOrchestrator {
+  /** Counts every successful resolver invocation in the current run, for the per-batch cap. */
+  private agentCalls = 0;
+  /** Wall-clock start of the current run; used for the per-batch time cap. */
+  private startedAt = 0;
+
   constructor(
     private readonly prLister: DependabotPRLister,
     private readonly branchManager: BranchManager,
@@ -46,6 +51,8 @@ export class BatchOrchestrator {
   ) {}
 
   async run(config: BatchConfig): Promise<BatchSummary> {
+    this.agentCalls = 0;
+    this.startedAt = Date.now();
     const integrationBranch = await this.branchManager.createIntegrationBranch(
       config.integrationBranchPrefix,
       config.baseBranch,
@@ -78,6 +85,20 @@ export class BatchOrchestrator {
     const results: PRResult[] = [];
 
     for (let i = 0; i < candidates.length; i++) {
+      if (this.wallClockExhausted(config)) {
+        core.warning(
+          `Batch wall-clock cap (${config.maxBatchWallClockSeconds}s) reached after ${i} PR(s); skipping remaining ${candidates.length - i}`,
+        );
+        for (const remaining of candidates.slice(i)) {
+          results.push({
+            pr: remaining,
+            status: 'FAIL',
+            skipped: { reason: 'wall-clock-cap' },
+          });
+        }
+        break;
+      }
+
       const pr = candidates[i]!;
       core.startGroup(`Processing PR #${pr.number} — ${pr.title}`);
       const { result, pushed } = await this.processPr(pr, config, integrationBranch);
@@ -122,6 +143,18 @@ export class BatchOrchestrator {
 
   private shouldUpdateBodyDuringLoop(processedIndex: number): boolean {
     return (processedIndex + 1) % BODY_UPDATE_INTERVAL === 0;
+  }
+
+  private agentBudgetExhausted(config: BatchConfig): boolean {
+    return this.agentCalls >= config.maxAgentCallsPerBatch;
+  }
+
+  private wallClockExhausted(config: BatchConfig): boolean {
+    return (Date.now() - this.startedAt) / 1000 >= config.maxBatchWallClockSeconds;
+  }
+
+  private guardrailGaveUp(reason: 'agent-call-cap'): AgentGaveUp {
+    return { stage: 'guardrail', reason, outputTail: '' };
   }
 
   private async updateBatchPrBody(
@@ -177,7 +210,24 @@ export class BatchOrchestrator {
     conflictedFiles: string[],
     preMergeSha: string,
   ): Promise<{ result: PRResult; pushed: boolean }> {
+    if (config.agenticResolve && this.agentBudgetExhausted(config)) {
+      core.warning(
+        `PR #${pr.number}: skipping agent conflict resolution (per-batch cap of ${config.maxAgentCallsPerBatch} reached)`,
+      );
+      await this.merger.abortMerge();
+      return {
+        result: this.toPrResult(
+          pr,
+          { kind: 'merge-conflict', files: conflictedFiles },
+          undefined,
+          this.guardrailGaveUp('agent-call-cap'),
+        ),
+        pushed: false,
+      };
+    }
+
     if (config.agenticResolve) {
+      this.agentCalls += 1;
       const resolution = await this.resolver.resolveConflict({ pr, conflictedFiles });
       if (resolution.kind === 'resolved') {
         const agentAttempt: AgentAttempt = {
@@ -228,7 +278,13 @@ export class BatchOrchestrator {
     core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
 
     let agentGaveUp: AgentGaveUp | undefined;
-    if (config.agenticResolve) {
+    if (config.agenticResolve && this.agentBudgetExhausted(config)) {
+      core.warning(
+        `PR #${pr.number}: skipping agent validation fix (per-batch cap of ${config.maxAgentCallsPerBatch} reached)`,
+      );
+      agentGaveUp = this.guardrailGaveUp('agent-call-cap');
+    } else if (config.agenticResolve) {
+      this.agentCalls += 1;
       const resolution = await this.resolver.resolveValidation({ pr, validation });
       if (resolution.kind === 'resolved') {
         const agentAttempt: AgentAttempt = {

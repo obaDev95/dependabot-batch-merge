@@ -59397,6 +59397,10 @@ class BatchOrchestrator {
     reporter;
     prWriter;
     resolver;
+    /** Counts every successful resolver invocation in the current run, for the per-batch cap. */
+    agentCalls = 0;
+    /** Wall-clock start of the current run; used for the per-batch time cap. */
+    startedAt = 0;
     constructor(prLister, branchManager, merger, validator, analyzer, reporter, prWriter, resolver) {
         this.prLister = prLister;
         this.branchManager = branchManager;
@@ -59408,6 +59412,8 @@ class BatchOrchestrator {
         this.resolver = resolver;
     }
     async run(config) {
+        this.agentCalls = 0;
+        this.startedAt = Date.now();
         const integrationBranch = await this.branchManager.createIntegrationBranch(config.integrationBranchPrefix, config.baseBranch);
         lib_core.info(`Integration branch: ${integrationBranch}`);
         const candidates = await this.prLister.extractOpenPullRequests(config.dependabotAuthor, config.maxPrs);
@@ -59424,6 +59430,17 @@ class BatchOrchestrator {
         }
         const results = [];
         for (let i = 0; i < candidates.length; i++) {
+            if (this.wallClockExhausted(config)) {
+                lib_core.warning(`Batch wall-clock cap (${config.maxBatchWallClockSeconds}s) reached after ${i} PR(s); skipping remaining ${candidates.length - i}`);
+                for (const remaining of candidates.slice(i)) {
+                    results.push({
+                        pr: remaining,
+                        status: 'FAIL',
+                        skipped: { reason: 'wall-clock-cap' },
+                    });
+                }
+                break;
+            }
             const pr = candidates[i];
             lib_core.startGroup(`Processing PR #${pr.number} — ${pr.title}`);
             const { result, pushed } = await this.processPr(pr, config, integrationBranch);
@@ -59459,6 +59476,15 @@ class BatchOrchestrator {
     shouldUpdateBodyDuringLoop(processedIndex) {
         return (processedIndex + 1) % BODY_UPDATE_INTERVAL === 0;
     }
+    agentBudgetExhausted(config) {
+        return this.agentCalls >= config.maxAgentCallsPerBatch;
+    }
+    wallClockExhausted(config) {
+        return (Date.now() - this.startedAt) / 1000 >= config.maxBatchWallClockSeconds;
+    }
+    guardrailGaveUp(reason) {
+        return { stage: 'guardrail', reason, outputTail: '' };
+    }
     async updateBatchPrBody(prNumber, integrationBranch, baseBranch, results, finalSuite) {
         await this.prWriter.updatePrBody(prNumber, this.reporter.build({
             integrationBranch,
@@ -59481,7 +59507,16 @@ class BatchOrchestrator {
         return this.handleValidationFailure(pr, config, integrationBranch, validation, preMergeSha);
     }
     async handleMergeConflict(pr, config, integrationBranch, conflictedFiles, preMergeSha) {
+        if (config.agenticResolve && this.agentBudgetExhausted(config)) {
+            lib_core.warning(`PR #${pr.number}: skipping agent conflict resolution (per-batch cap of ${config.maxAgentCallsPerBatch} reached)`);
+            await this.merger.abortMerge();
+            return {
+                result: this.toPrResult(pr, { kind: 'merge-conflict', files: conflictedFiles }, undefined, this.guardrailGaveUp('agent-call-cap')),
+                pushed: false,
+            };
+        }
         if (config.agenticResolve) {
+            this.agentCalls += 1;
             const resolution = await this.resolver.resolveConflict({ pr, conflictedFiles });
             if (resolution.kind === 'resolved') {
                 const agentAttempt = {
@@ -59523,7 +59558,12 @@ class BatchOrchestrator {
     async handleValidationFailure(pr, config, integrationBranch, validation, preMergeSha) {
         lib_core.warning(`PR #${pr.number} validation FAIL (exit ${validation.exitCode})`);
         let agentGaveUp;
-        if (config.agenticResolve) {
+        if (config.agenticResolve && this.agentBudgetExhausted(config)) {
+            lib_core.warning(`PR #${pr.number}: skipping agent validation fix (per-batch cap of ${config.maxAgentCallsPerBatch} reached)`);
+            agentGaveUp = this.guardrailGaveUp('agent-call-cap');
+        }
+        else if (config.agenticResolve) {
+            this.agentCalls += 1;
             const resolution = await this.resolver.resolveValidation({ pr, validation });
             if (resolution.kind === 'resolved') {
                 const agentAttempt = {
@@ -59739,6 +59779,11 @@ class ReportBuilder {
             const icon = r.status === 'PASS' ? '✅' : '❌';
             let category = '';
             let note = '';
+            if (r.skipped) {
+                category = '⏱ skipped (wall-clock)';
+                note = '';
+                return `| [#${r.pr.number}](${r.pr.htmlUrl}) | ${escapePipes(r.pr.title)} | ${icon} ${r.status} | ${escapePipes(category)} | ${escapePipes(note)} |`;
+            }
             if (r.status === 'PASS') {
                 category = r.agentAttempt ? '🤖 agent-assisted' : '—';
             }
@@ -60009,7 +60054,11 @@ class ClaudeAgenticResolver {
             env.ANTHROPIC_API_KEY = this.apiKey;
         else
             delete env.ANTHROPIC_API_KEY;
-        const { output, timedOut, exitCode } = await this.spawnFn(['-p', prompt, '--dangerously-skip-permissions'], env, this.timeoutMs);
+        // Stream the agent's events (stream-json requires --verbose) so a slow or
+        // timed-out run still leaves a diagnostic tail. Plain `-p` only prints the
+        // final text, so a kill-on-timeout captured nothing — which is exactly when
+        // we most need to see what the agent was stuck on.
+        const { output, timedOut, exitCode } = await this.spawnFn(['-p', prompt, '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions'], env, this.timeoutMs);
         const outputTail = tail(output);
         if (timedOut) {
             lib_core.warning(`PR #${prNumber}: agent timed out after ${this.timeoutMs}ms`);
@@ -60027,7 +60076,7 @@ class ClaudeAgenticResolver {
         return {
             kind: 'resolved',
             commitSha: postSha,
-            summary: claude_resolver_firstLine(output) || `Agent ${kind} fix`,
+            summary: `Agent resolved ${kind} fix`,
             outputTail,
         };
     }
@@ -60048,10 +60097,6 @@ function logOutputTail(prNumber, outputTail) {
     if (!outputTail)
         return;
     console.error(`[agent #${prNumber} tail begin]\n${outputTail}\n[agent #${prNumber} tail end]`);
-}
-function claude_resolver_firstLine(text) {
-    const idx = text.indexOf('\n');
-    return idx === -1 ? text.trim() : text.slice(0, idx).trim();
 }
 
 ;// CONCATENATED MODULE: ./src/validation/command-runner.ts
@@ -60176,9 +60221,11 @@ server.registerTool('run-batch-merge', {
             .optional()
             .describe('Anthropic API key for Claude-powered failure explanations and agentic resolution. Defaults to $ANTHROPIC_API_KEY.'),
         agenticResolve: classic_schemas_boolean().default(false).describe('Invoke Claude agent to attempt fixes before recording failures'),
-        agentTimeoutSeconds: classic_schemas_number().int().positive().default(600).describe('Per-attempt timeout for the Claude agent'),
+        agentTimeoutSeconds: classic_schemas_number().int().positive().default(1200).describe('Per-attempt timeout for the Claude agent'),
+        maxAgentCallsPerBatch: classic_schemas_number().int().positive().default(10).describe('Hard cap on Claude agent invocations across the whole batch (cost guardrail)'),
+        maxBatchWallClockSeconds: classic_schemas_number().int().positive().default(3600).describe('Hard cap on total batch wall-clock seconds; remaining PRs are skipped once exceeded'),
     },
-}, async ({ token, anthropicApiKey, owner, repo, baseBranch, integrationBranchPrefix, validationCommand, onFailure, reRunFinalSuite, draftPr, maxPrs, agenticResolve, agentTimeoutSeconds, }) => {
+}, async ({ token, anthropicApiKey, owner, repo, baseBranch, integrationBranchPrefix, validationCommand, onFailure, reRunFinalSuite, draftPr, maxPrs, agenticResolve, agentTimeoutSeconds, maxAgentCallsPerBatch, maxBatchWallClockSeconds, }) => {
     const resolvedToken = token ?? process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN;
     if (!resolvedToken) {
         throw new Error('Set GITHUB_TOKEN (or GH_TOKEN) in your environment, or pass token explicitly.');
@@ -60202,6 +60249,8 @@ server.registerTool('run-batch-merge', {
             dependabotAuthor: 'dependabot[bot]',
             agenticResolve,
             agentTimeoutSeconds,
+            maxAgentCallsPerBatch,
+            maxBatchWallClockSeconds,
         },
         token: resolvedToken,
         anthropicApiKey: resolvedApiKey,

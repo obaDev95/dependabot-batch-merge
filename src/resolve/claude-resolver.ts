@@ -115,8 +115,12 @@ export class ClaudeAgenticResolver implements AgenticResolver {
     const env: NodeJS.ProcessEnv = { ...process.env };
     if (this.apiKey) env.ANTHROPIC_API_KEY = this.apiKey;
     else delete env.ANTHROPIC_API_KEY;
+    // Stream the agent's events (stream-json requires --verbose) so a slow or
+    // timed-out run still leaves a diagnostic tail. Plain `-p` only prints the
+    // final text, so a kill-on-timeout captured nothing — which is exactly when
+    // we most need to see what the agent was stuck on.
     const { output, timedOut, exitCode } = await this.spawnFn(
-      ['-p', prompt, '--dangerously-skip-permissions'],
+      ['-p', prompt, '--output-format', 'stream-json', '--verbose', '--dangerously-skip-permissions'],
       env,
       this.timeoutMs,
     );
@@ -141,7 +145,7 @@ export class ClaudeAgenticResolver implements AgenticResolver {
     return {
       kind: 'resolved',
       commitSha: postSha,
-      summary: firstLine(output) || `Agent ${kind} fix`,
+      summary: `Agent resolved ${kind} fix`,
       outputTail,
     };
   }
@@ -163,9 +167,4 @@ function tail(text: string, bytes = 4000): string {
 function logOutputTail(prNumber: number, outputTail: string): void {
   if (!outputTail) return;
   console.error(`[agent #${prNumber} tail begin]\n${outputTail}\n[agent #${prNumber} tail end]`);
-}
-
-function firstLine(text: string): string {
-  const idx = text.indexOf('\n');
-  return idx === -1 ? text.trim() : text.slice(0, idx).trim();
 }

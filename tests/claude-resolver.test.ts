@@ -42,11 +42,13 @@ describe('ClaudeAgenticResolver', () => {
     expect(result.kind).toBe('resolved');
     if (result.kind === 'resolved') {
       expect(result.commitSha).toBe('bbb');
-      expect(result.summary).toBe('Fixed the type error');
+      expect(result.summary).toBe('Agent resolved validation fix');
     }
     expect(spawnFn).toHaveBeenCalledOnce();
     const [args, env] = spawnFn.mock.calls[0] as [string[], NodeJS.ProcessEnv, number];
     expect(args[0]).toBe('-p');
+    expect(args).toContain('--output-format');
+    expect(args).toContain('stream-json');
     expect(env['ANTHROPIC_API_KEY']).toBe('test-key');
   });
 
